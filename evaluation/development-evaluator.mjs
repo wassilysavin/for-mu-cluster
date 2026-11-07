@@ -25,23 +25,65 @@ async function approved(registryId, gold) {
 const identity = row => ({ case_id: row.case_id, split: row.split, cohort: row.cohort,
   dialogue_id: row.dialogue_id ?? null, turn_index: row.turn_index, question: row.question, author: row.author });
 
-/** Sequential development evaluation. The first provider argument is the
- * normal production request; the second is a technical case identity for
- * receipts and must never be added to the model prompt or used for routing.
- * Gold/adjudication never supplies the provider's next session.
- * This core neither launches models nor authenticates external job files;
- * the frozen CLI/native-worker adapter owns those boundaries and persistence. */
-export async function evaluateDevelopment(registry, planned, {
-  split, provider, adjudicate, onRecord = async () => {}, stopOnProviderFailure = true, sessionIdFor,
-} = {}) {
-  if (!['train', 'dev'].includes(split) || typeof provider !== 'function' ||
-      !Array.isArray(planned) || !planned.length || typeof onRecord !== 'function' ||
-      (adjudicate !== undefined && typeof adjudicate !== 'function') || typeof stopOnProviderFailure !== 'boolean') {
-    fail('Explicit TRAIN-fit or DEV plan and provider required; acceptance is separate.');
+const recoveryPolicy = 'reviewed_recovery_control';
+
+async function approveRecoveryControl(registry, row, dialogueVersion) {
+  const control = row.actual_history_control;
+  const keys = Object.keys(control ?? {});
+  const target = typeof control?.target === 'string' && /^e([1-9]\d*)$/.exec(control.target);
+  if (dialogueVersion !== 2 || !row.dialogue_id || !target || Number(target[1]) >= row.turn_index ||
+      !['retry_exchange', 'correct_or_fresh'].includes(control.kind) ||
+      keys.some(key => !['kind', 'target', ...(control.kind === 'correct_or_fresh' ? ['match', 'replace'] : [])].includes(key)) ||
+      (Object.hasOwn(control, 'replace') && control.replace !== true) ||
+      row.review.actual_history_control_sha256 !== await textHash(canonical({ control, batches: row.allowed_model_call_batches }))) {
+    fail('A recovery control must bind its reviewed condition, earlier exchange and complete fresh programs.');
   }
-  // Copy/freeze before any model output. A callback cannot change denominators
-  // or future questions after seeing a response.
-  planned = freeze(clone(planned));
+  if (control.kind === 'correct_or_fresh') registry.validateCall(control.match);
+  for (const batch of row.allowed_model_call_batches) {
+    if (!Array.isArray(batch) || !batch.length || (control.kind === 'correct_or_fresh' && batch.length !== 1)) {
+      fail('A recovery control requires complete programs, with one fresh call for a correction.');
+    }
+    for (const call of batch) registry.validateCall(call);
+    if (control.kind === 'correct_or_fresh' && same(control.match, batch[0])) {
+      fail('A correction control must change the independently identified call.');
+    }
+  }
+}
+
+function recoveryGold(row, before, historyHash) {
+  const control = row.actual_history_control;
+  const previous = before.exchanges.find(exchange => exchange.id === control.target);
+  if (!previous) return null;
+  let batches = row.allowed_model_call_batches;
+  if (control.kind === 'retry_exchange' && previous.outcome !== 'committed') {
+    batches = batches.map(batch => [{ name: 'retry_exchange', arguments: { target: previous.id } }, ...batch]);
+  } else if (control.kind === 'correct_or_fresh' && previous.outcome === 'committed') {
+    const turn = before.semantic.turns.find(turn => turn.id === previous.semantic_turn_id);
+    const matches = turn.answers.filter(answer => same(answer.call, control.match));
+    if (matches.length > 1) return null;
+    if (matches.length === 1) {
+      const answer = matches[0];
+      batches = batches.map(([fresh]) => {
+        if (control.replace || fresh.name !== answer.call.name) {
+          return [{ name: fresh.name, arguments: { ...fresh.arguments, _replace: answer.id } }];
+        }
+        const known = answer.call.arguments;
+        const changes = Object.fromEntries(Object.entries(fresh.arguments)
+          .filter(([key, value]) => !Object.hasOwn(known, key) || !same(known[key], value)));
+        const remove = Object.keys(known).filter(key => !Object.hasOwn(fresh.arguments, key));
+        return [{ name: `change_${fresh.name}`, arguments: { target: answer.id, changes, ...(remove.length ? { remove } : {}) } }];
+      });
+    }
+  }
+  return freeze({ ...row, allowed_model_call_batches: batches,
+    review: { ...row.review, before_visible_history_sha256: historyHash } });
+}
+
+export async function validateDevelopmentPlan(registry, planned, { split, dialogueVersion = 1 } = {}) {
+  if (!['train', 'dev'].includes(split) || ![1, 2].includes(dialogueVersion) ||
+      !Array.isArray(planned) || !planned.length) {
+    fail('Explicit TRAIN-fit or DEV plan required; acceptance is separate.');
+  }
   const registryId = await registry.fingerprint(), ids = new Set(), episodeCounts = new Map();
   for (const row of planned) {
     if (row.split !== split || !row.case_id || ids.has(row.case_id) ||
@@ -49,9 +91,12 @@ export async function evaluateDevelopment(registry, planned, {
       fail('Unknown split/cohort, missing question or duplicate planned case.');
     }
     ids.add(row.case_id); await approved(registryId, row);
+    if (row.history_policy === recoveryPolicy) await approveRecoveryControl(registry, row, dialogueVersion);
+    else if (Object.hasOwn(row, 'actual_history_control')) fail('Unexpected recovery control without its reviewed history policy.');
     if (row.dialogue_id) {
       const previous = episodeCounts.get(row.dialogue_id) ?? 0;
-      if (row.turn_index !== previous + 1 || !['context_invariant', 'exact_visible_prefix_or_independent_adjudication'].includes(row.history_policy)) {
+      if (row.turn_index !== previous + 1 ||
+          !['context_invariant', 'exact_visible_prefix_or_independent_adjudication', recoveryPolicy].includes(row.history_policy)) {
         fail('Complete ordered episodes and explicitly reviewed history policy required.');
       }
       if (!/^[a-f0-9]{64}$/.test(row.review.before_visible_history_sha256 ?? '')) {
@@ -61,14 +106,35 @@ export async function evaluateDevelopment(registry, planned, {
     } else if (row.turn_index !== 0) fail('Standalone questions start in fresh sessions.');
   }
   if ([...episodeCounts.values()].some(count => count !== 5)) fail('The declared development episodes have exactly five turns.');
+  return registryId;
+}
+
+/** The provider sees actual history only. The second argument is for receipts. */
+export async function evaluateDevelopment(registry, planned, {
+  split, provider, adjudicate, onRecord = async () => {}, stopOnProviderFailure = true,
+  dialogueVersion = 1, sessionIdFor,
+} = {}) {
+  if (typeof provider !== 'function' || typeof onRecord !== 'function' ||
+      (adjudicate !== undefined && typeof adjudicate !== 'function') || typeof stopOnProviderFailure !== 'boolean' ||
+      (sessionIdFor !== undefined && typeof sessionIdFor !== 'function')) {
+    fail('A valid provider and evaluation callbacks are required.');
+  }
+  planned = freeze(clone(planned));
+  const registryId = await validateDevelopmentPlan(registry, planned, { split, dialogueVersion });
   const sessions = new Map(), blocked = new Map(), results = [];
   let aborted = null, generated = 0;
   for (const row of planned) {
-    const before = sessions.get(row.dialogue_id) ?? await createSession(registry, sessionIdFor?.(row.dialogue_id ?? row.case_id));
+    const before = sessions.get(row.dialogue_id) ?? await createSession(registry, {
+      dialogueVersion, sessionId: sessionIdFor?.(row.dialogue_id ?? row.case_id),
+    });
     const historyHash = await visibleHistoryHash(before);
     let gold = row, interpretation = 'reviewed_original', blockedReason = blocked.get(row.dialogue_id), adjudication = null;
-    if (!blockedReason && row.dialogue_id && row.history_policy !== 'context_invariant' &&
-        historyHash !== row.review.before_visible_history_sha256) {
+    if (!blockedReason && row.history_policy === recoveryPolicy) {
+      gold = recoveryGold(row, before, historyHash);
+      if (gold) interpretation = 'pre_reviewed_recovery_control';
+    }
+    if (!blockedReason && (!gold || (row.dialogue_id && row.history_policy !== 'context_invariant' &&
+        row.history_policy !== recoveryPolicy && historyHash !== row.review.before_visible_history_sha256))) {
       gold = null; interpretation = 'actual_history_review_required';
       if (adjudicate) {
         // No nominal calls and no current candidate output are exposed here.

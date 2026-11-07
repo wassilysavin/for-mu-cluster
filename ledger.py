@@ -1,6 +1,6 @@
 """Bind cluster runs and evaluations to immutable, reproducible inputs."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import fcntl
 from hashlib import file_digest, sha256
@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 
 SCHEMA_VERSION = 1
@@ -65,7 +65,7 @@ def _sync_directory(directory):
         os.close(fd)
 
 
-def _publish_json(path, value):
+def publish_json(path, value):
     with NamedTemporaryFile(dir=path.parent, delete=False) as stream:
         temporary = Path(stream.name)
         try:
@@ -117,8 +117,8 @@ def _check_identity(identity):
         _require_record(identity["train"], "Training dataset")
     evaluation = identity.get("evaluation")
     _require_record(evaluation, "Evaluation dataset")
-    if evaluation.get("split") != "DEV700":
-        raise ValueError("The cluster evaluator is approved for DEV700")
+    if evaluation.get("split") not in {"DEV700", "DEV-VOLUME"}:
+        raise ValueError("The cluster evaluator requires an approved development split")
 
 
 class Run:
@@ -137,7 +137,7 @@ class Run:
             stream.flush()
             os.fsync(stream.fileno())
 
-    def write_result(self, metrics, checkpoint, **details):
+    def write_result(self, metrics, checkpoint, *, name="result.json", **details):
         if not self._active:
             raise RuntimeError("Run lock is no longer held")
         _require_record(checkpoint, "Evaluated checkpoint")
@@ -146,12 +146,26 @@ class Run:
         result = {"schema_version": SCHEMA_VERSION, "run_id": self.path.name,
                   "identity_sha256": self.identity_sha256, "created_at": _now(),
                   "checkpoint": checkpoint, "metrics": metrics, "details": details}
-        _publish_json(self.path / "result.json", result)
+        publish_json(self.path / name, result)
         return result
 
 
 @contextmanager
-def open_run(runs_root, run_id, identity, *, resume=False, stage="train"):
+def execution_lease(runs_root):
+    runs_root.mkdir(parents=True, exist_ok=True)
+    fd = os.open(runs_root / ".execution.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("Another training or evaluation job holds the execution lock") from exc
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def open_run(runs_root, run_id, identity, *, resume=False, stage="train", lease_held=False):
     if not SAFE_ID.fullmatch(run_id) or not SAFE_ID.fullmatch(stage):
         raise ValueError("Invalid run ID or stage")
     _check_identity(identity)
@@ -161,17 +175,16 @@ def open_run(runs_root, run_id, identity, *, resume=False, stage="train"):
     identity_hash = sha256(_json_bytes(identity)).hexdigest()
     root = Path(runs_root).resolve()
     path = root / run_id
-    if not resume:
-        root.mkdir(parents=True, exist_ok=True)
-
-    fd = os.open(root / ".execution.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError("Another training or evaluation job holds the execution lock") from exc
+    with nullcontext() if lease_held else execution_lease(root):
         if not resume:
-            path.mkdir()
+            if path.exists() or path.is_symlink():
+                raise FileExistsError(f"Run directory already exists: {path}")
+            manifest = {"schema_version": SCHEMA_VERSION, "run_id": run_id,
+                        "created_at": _now(), "identity_sha256": identity_hash,
+                        "identity": identity}
+            with TemporaryDirectory(prefix=".run-", dir=root) as staging:
+                publish_json(Path(staging) / "run.json", manifest)
+                os.rename(staging, path)
             _sync_directory(root)
         if path.is_symlink() or not path.is_dir():
             raise ValueError(f"Invalid run directory {path}")
@@ -181,12 +194,6 @@ def open_run(runs_root, run_id, identity, *, resume=False, stage="train"):
                 raise ValueError("Run identity changed. Start a new run ID.")
             if (path / "result.json").exists():
                 raise ValueError("Run already has an evaluation result. Start a new run ID.")
-        else:
-            manifest = {"schema_version": SCHEMA_VERSION, "run_id": run_id,
-                        "created_at": _now(), "identity_sha256": identity_hash,
-                        "identity": identity}
-            _publish_json(path / "run.json", manifest)
-
         _repair_partial_event(path / "events.jsonl")
         run = Run(path, manifest, stage)
         run.event("resumed" if resume else "started")
@@ -202,8 +209,6 @@ def open_run(runs_root, run_id, identity, *, resume=False, stage="train"):
             run.event("completed")
         finally:
             run._active = False
-    finally:
-        os.close(fd)
 
 
 def _read_manifest(path):
@@ -213,6 +218,18 @@ def _read_manifest(path):
             or manifest["identity_sha256"] != identity_hash):
         raise ValueError(f"Invalid run manifest {path / 'run.json'}")
     return manifest
+
+
+def read_result(path, name="result.json", *, identity=None):
+    result_path = path / name
+    if not result_path.is_file():
+        return None
+    manifest = _read_manifest(path)
+    result = json.loads(result_path.read_bytes())
+    if (result["schema_version"] != SCHEMA_VERSION or result["identity_sha256"] != manifest["identity_sha256"]
+            or result["run_id"] != path.name or (identity is not None and manifest["identity"] != identity)):
+        raise ValueError(f"Unbound evaluation result {result_path}")
+    return result
 
 
 def _stage_status(path):
@@ -234,16 +251,12 @@ def report(runs_root):
     if not root.exists():
         return rows
     for path in sorted(root.iterdir()):
-        if path.is_symlink() or not path.is_dir() or not (path / "run.json").exists():
+        if path.name.startswith(".") or path.is_symlink() or not path.is_dir() or not (path / "run.json").exists():
             continue
         manifest = _read_manifest(path)
         identity = manifest["identity"]
-        result_path = path / "result.json"
-        result = json.loads(result_path.read_bytes()) if result_path.exists() else None
-        if result is not None and (result["schema_version"] != SCHEMA_VERSION
-                                   or result["identity_sha256"] != manifest["identity_sha256"]
-                                   or result["run_id"] != path.name):
-            raise ValueError(f"Unbound evaluation result {result_path}")
+        result = read_result(path)
+        milestones = [read_result(path, item.name) for item in sorted(path.glob("result-step-*.json"))]
         rows.append({"run_id": path.name, "created_at": manifest["created_at"],
                      "identity_sha256": manifest["identity_sha256"],
                      "experiment_id": identity["experiment_id"],
@@ -253,5 +266,6 @@ def report(runs_root):
                      "runtime": identity["runtime"],
                      "status": _stage_status(path / "events.jsonl"),
                      "checkpoint": result["checkpoint"] if result else None,
-                     "metrics": result["metrics"] if result else None})
+                     "metrics": result["metrics"] if result else None,
+                     **({"milestones": milestones} if milestones else {})})
     return rows

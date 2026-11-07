@@ -6,12 +6,18 @@ import { IncompleteModelOutput } from './model-result.mjs';
 
 const failureMessage = "I couldn't produce a reliable answer to that request.";
 const contextLimitMessage = 'This conversation is too long to continue. Please start a new chat.';
-const initial = (registryId, sessionId) => freeze({ version: 1, registry_id: registryId, session_id: sessionId,
+const initial = (registryId, sessionId, dialogueVersion) => freeze({ version: 1, registry_id: registryId, session_id: sessionId,
+  ...(dialogueVersion === 2 ? { dialogue_version: 2 } : {}),
   semantic: createState(), exchanges: [] });
 
-export async function createSession(registry, sessionId = globalThis.crypto.randomUUID()) {
-  return initial(await registry.fingerprint(), sessionId);
+export async function createSession(registry, { dialogueVersion = 1, sessionId = globalThis.crypto.randomUUID() } = {}) {
+  if (![1, 2].includes(dialogueVersion) || typeof sessionId !== 'string' || !sessionId) {
+    throw new ContractError('invalid_session_options', 'Invalid dialogue version or session identity.');
+  }
+  return initial(await registry.fingerprint(), sessionId, dialogueVersion);
 }
+
+export const recoveryExchanges = session => session.dialogue_version === 2 ? session.exchanges : undefined;
 
 function appendExchange(session, semantic, exchange) {
   const item = { id: `e${session.exchanges.length + 1}`, ...exchange };
@@ -19,7 +25,8 @@ function appendExchange(session, semantic, exchange) {
 }
 
 async function assertCurrentRegistry(registry, session) {
-  if (session.version !== 1 || session.registry_id !== await registry.fingerprint()) {
+  if (session.version !== 1 || ![undefined, 2].includes(session.dialogue_version) ||
+      session.registry_id !== await registry.fingerprint()) {
     throw new ContractError('registry_changed', 'This conversation belongs to a different source or contract version.');
   }
 }
@@ -34,8 +41,9 @@ export async function applyModelOutput(registry, session, question, rawOutput, e
   let result;
   try {
     modelCalls = decodeCalls(rawOutput);
-    internalCalls = compileModelCalls(registry, session.semantic, modelCalls);
-    result = executeTurn(registry, session.semantic, question, internalCalls);
+    const exchanges = recoveryExchanges(session);
+    internalCalls = compileModelCalls(registry, session.semantic, modelCalls, exchanges);
+    result = executeTurn(registry, session.semantic, question, internalCalls, exchanges);
     if (!result.ok) throw new ContractError(result.error.code, result.error.message, result.error.details);
   } catch (error) {
     if (!(error instanceof ContractError)) throw error;
@@ -108,7 +116,7 @@ export async function restoreSession(registry, envelope, key) {
   catch { throw new ContractError('invalid_snapshot', 'Invalid conversation data.'); }
   await assertCurrentRegistry(registry, saved);
   if (typeof saved.session_id !== 'string' || !Array.isArray(saved.exchanges)) throw new ContractError('invalid_snapshot', 'Missing conversation identity or exchanges.');
-  let replay = initial(saved.registry_id, saved.session_id);
+  let replay = initial(saved.registry_id, saved.session_id, saved.dialogue_version);
   for (const exchange of saved.exchanges) {
     if (exchange.outcome === 'provider_error') replay = await recordProviderFailure(registry, replay, exchange.question, exchange.error_code);
     else if (exchange.error_code === 'incomplete_model_output') replay = await recordIncompleteModelOutput(registry, replay,
@@ -136,7 +144,8 @@ export class SessionController {
     try {
       let next;
       try {
-        const raw = await provider({ question, session: base, history: sessionHistory(base), tools: modelTools(this.registry, base.semantic),
+        const raw = await provider({ question, session: base, history: sessionHistory(base),
+          tools: modelTools(this.registry, base.semantic, recoveryExchanges(base)),
           state: base.semantic, signal: abort.signal });
         next = await applyModelOutput(this.registry, base, question, raw);
       } catch (error) {
@@ -159,7 +168,7 @@ export class SessionController {
     const token = this.generation;
     this.generation = null;
     token?.abort.abort();
-    this.session = await createSession(this.registry);
+    this.session = await createSession(this.registry, { dialogueVersion: this.session.dialogue_version });
     return this.session;
   }
 }

@@ -41,6 +41,30 @@ export const dialogueTools = freeze([
 const dialogueByName = new Map(dialogueTools.map(t => [t.name, t]));
 const callShape = object({ name: string, arguments: { type: 'object' } });
 
+const referenceQuestions = {
+  answer: 'Which earlier answer do you mean? If none matches, please restate your question.',
+  exchange: 'Which earlier request do you mean? If none matches, please restate it.',
+  pending: 'Which pending request do you mean? If none matches, please restate what you want to resolve.',
+};
+
+export function recoveryTools(exchanges) {
+  if (exchanges === undefined) return [];
+  const targets = exchanges.map(exchange => exchange.id);
+  const failures = exchanges.filter(exchange => ['error', 'provider_error'].includes(exchange.outcome))
+    .map(exchange => exchange.id);
+  return [
+    ...(targets.length ? [{ name: 'repeat_exchange',
+      description: 'Repeat the entire displayed reply to this actual exchange verbatim, including an error or clarification. Do not try to answer the old request.',
+      parameters: object({ target: { type: 'string', enum: targets } }) }] : []),
+    ...(failures.length ? [{ name: 'retry_exchange',
+      description: 'Start a batch that answers this actual failed exchange again. Follow with the fresh typed domain calls for its original request and the current corrections. Do not modify previous answers or pending items.',
+      parameters: object({ target: { type: 'string', enum: failures } }) }] : []),
+    { name: 'clarify_reference',
+      description: 'Ask the user to identify or restate the intended prior answer, exchange or pending request when it cannot be safely addressed.',
+      parameters: object({ kind: { type: 'string', enum: Object.keys(referenceQuestions) } }) },
+  ];
+}
+
 export function createState() {
   return freeze({ version: 1, revision: 0, turns: [], pending: [], focus: [] });
 }
@@ -74,13 +98,24 @@ export function renderAnswer(answer) {
   return text;
 }
 
+function validateRetry(registry, calls, callIndex) {
+  const fresh = call => registry.tool(call.name) ||
+    (call.name === 'clarify_call' && !call.arguments.revision_target && !call.arguments.pending_target);
+  const followers = calls.slice(1);
+  followers.forEach(call => validate(callShape, call));
+  if (callIndex !== 0 || !followers.some(fresh) ||
+      followers.some(call => call.name !== 'decline_request' && !fresh(call))) {
+    throw new ContractError('invalid_retry', 'A retry must start a batch of fresh domain calls, with at least one supported operation.');
+  }
+}
+
 /**
  * Execute model-selected calls, never interpret the raw question. Compute the
  * entire turn against the previous committed state, then commit once. Rejected
  * batches return the identical original state; the UI may separately display
  * an error, but must not claim that this is a completed scientific answer.
  */
-export function executeTurn(registry, state, question, inputCalls) {
+export function executeTurn(registry, state, question, inputCalls, exchanges) {
   try {
     if (state.version !== 1 || state.revision !== state.turns.length) throw new ContractError('invalid_state', 'Invalid state revision.');
     if (typeof question !== 'string' || !question.trim()) throw new ContractError('invalid_question', 'A nonempty question is required.');
@@ -95,6 +130,7 @@ export function executeTurn(registry, state, question, inputCalls) {
     const touchedTargets = new Set();
     const groupProgress = new Map();
     const pendingRevisionOwners = new Map();
+    const recovery = new Map(recoveryTools(exchanges).map(tool => [tool.name, tool]));
 
     function appendAnswer(call, extra) {
       const answer = makeAnswer(registry, call, `${turnId}.c${answers.length + 1}`, extra);
@@ -243,6 +279,23 @@ export function executeTurn(registry, state, question, inputCalls) {
 
     for (const [callIndex, call] of calls.entries()) {
       validate(callShape, call);
+      const recoveryTool = recovery.get(call.name);
+      if (recoveryTool) {
+        validate(recoveryTool.parameters, call.arguments);
+        const { kind, target } = call.arguments;
+        if (call.name === 'retry_exchange') {
+          validateRetry(registry, calls, callIndex);
+          effects.push({ kind: 'exchange_retried', target });
+        } else if (call.name === 'repeat_exchange') {
+          const previous = exchanges.find(exchange => exchange.id === target);
+          responseParts.push({ kind: 'replayed_exchange', id: target, text: previous.assistant });
+          effects.push({ kind: 'exchange_repeated', target });
+        } else {
+          responseParts.push({ kind: 'reference_clarification', text: referenceQuestions[kind] });
+          effects.push({ kind: 'reference_clarification', reference: kind });
+        }
+        continue;
+      }
       const tool = dialogueByName.get(call.name);
       if (!tool) { appendAnswer(call); continue; }
       validate(tool.parameters, call.arguments);

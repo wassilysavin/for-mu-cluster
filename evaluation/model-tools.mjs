@@ -1,5 +1,5 @@
 import { clone, ContractError, freeze, validate, assertSchema } from './schema.mjs';
-import { declineRequestTool } from './dialogue.mjs';
+import { declineRequestTool, recoveryTools } from './dialogue.mjs';
 
 const string = { type: 'string', minLength: 1 };
 const object = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
@@ -7,7 +7,7 @@ const metaKeys = ['_clarify', '_missing', '_each', '_replace', '_resolve', '_sup
 
 /** Concrete schemas for the current real history. No untyped changes object,
  * universal program string, opaque source ID or implicit source selection. */
-export function modelTools(registry, state) {
+export function modelTools(registry, state, exchanges) {
   const answers = state.turns.flatMap(turn => turn.answers);
   const answerIds = answers.map(answer => answer.id);
   const pendingIds = state.pending.map(item => item.id);
@@ -44,22 +44,25 @@ export function modelTools(registry, state) {
     parameters: object({ target: { type: 'string', enum: answerIds } }, ['target']) });
   if (pendingIds.length) result.push({ name: 'cancel_pending', description: 'Cancel only this actual pending request.',
     parameters: object({ target: { type: 'string', enum: pendingIds } }, ['target']) });
+  result.push(...recoveryTools(exchanges));
   const names = result.map(tool => tool.name);
   if (new Set(names).size !== names.length) throw new Error('Domain and dialogue function names collide.');
   result.forEach(tool => assertSchema(tool.parameters));
   return freeze(result);
 }
 
-export function compileModelCalls(registry, state, input) {
+export function compileModelCalls(registry, state, input, exchanges) {
   if (!Array.isArray(input) || !input.length) throw new ContractError('invalid_calls', 'At least one model call is required.');
-  const exposed = new Map(modelTools(registry, state).map(tool => [tool.name, tool]));
+  const exposed = new Map(modelTools(registry, state, exchanges).map(tool => [tool.name, tool]));
+  const controlNames = new Set(['decline_request', 'repeat_answer', 'cancel_pending',
+    ...recoveryTools(exchanges).map(tool => tool.name)]);
   const calls = clone(input);
   return calls.map(call => {
     validate(object({ name: string, arguments: { type: 'object' } }, ['name', 'arguments']), call);
     const tool = exposed.get(call.name);
     if (!tool) throw new ContractError('unknown_function', 'The model selected a function not declared for this conversation.');
     validate(tool.parameters, call.arguments);
-    if (['decline_request', 'repeat_answer', 'cancel_pending'].includes(call.name)) return call;
+    if (controlNames.has(call.name)) return call;
     if (!registry.tool(call.name)) {
       if (!call.name.startsWith('change_')) throw new ContractError('unknown_function', 'Unknown dialogue function.');
       return { name: 'revise_call', arguments: call.arguments };

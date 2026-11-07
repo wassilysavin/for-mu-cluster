@@ -4,20 +4,24 @@ import argparse
 from hashlib import sha256
 from importlib.metadata import version
 import json
+from math import isfinite
 import os
 from pathlib import Path
 import platform
 import re
+from shutil import disk_usage
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-from time import monotonic, time_ns
+from time import monotonic, time, time_ns
+from types import SimpleNamespace
 
-from ledger import code_record, file_record, open_run, report
+from ledger import SAFE_ID, code_record, execution_lease, file_record, open_run, publish_json, read_result, report
 
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "experiments.json"
+VOLUME_CONFIG = ROOT / "experiments-volume.json"
 ARCHITECTURE = "functiongemma270m-lora16-volta-fp32-v2"
 PILOT_EXPERIMENT = "pilot-4847-fp32"
 VOCABULARY = 262144
@@ -46,9 +50,10 @@ def checked_asset(reference):
 
 
 class Schedule:
-    def __init__(self, path, expected_sha, arm, count, *, longest=False):
+    def __init__(self, path, expected_sha, arm, count, *, longest=False, probe=False, milestones=()):
         self.path = path
         slots = {}
+        probe_rows = []
         seen = set()
         digest = sha256()
         with path.open("rb") as stream:
@@ -63,23 +68,48 @@ class Schedule:
                 if case_id in seen:
                     raise ValueError(f"Duplicate TRAIN case {case_id}")
                 seen.add(case_id)
-                index = row["positions"].get(arm)
-                if index is None:
+                positions = row["positions"]
+                if not isinstance(positions, dict):
+                    raise ValueError(f"Invalid TRAIN positions {case_id}")
+                if arm not in positions and not probe:
                     continue
+                indices = positions.get(arm, [])
+                if type(indices) is int:
+                    indices = [indices]
                 ids = row["input_ids"]
                 prompt = row["prompt_tokens"]
-                if (type(index) is not int or index in slots or type(prompt) is not int
+                if (not isinstance(indices, list) or (arm in positions and not indices) or not isinstance(ids, list)
+                        or type(prompt) is not int
                         or not 0 < prompt < len(ids) <= CONTEXT or len(ids) - prompt > TARGET_LIMIT
                         or any(type(token) is not int or not 0 <= token < VOCABULARY for token in ids)):
                     raise ValueError(f"Invalid TRAIN record {case_id}")
-                slots[index] = (case_id, offset, len(ids), sha256(line).digest())
+                entry = (case_id, offset, len(ids), sha256(line).digest(), len(ids) - prompt)
+                if probe and positions:
+                    probe_rows.append(entry)
+                for index in indices:
+                    if type(index) is not int or not 0 <= index < count or index in slots:
+                        raise ValueError(f"Invalid or duplicate TRAIN position for {case_id}")
+                    slots[index] = entry
         if digest.hexdigest() != expected_sha:
             raise ValueError("TRAIN changed during schedule verification")
-        if sorted(slots) != list(range(count)):
+        if len(slots) != count or count < EXAMPLES_PER_UPDATE or count % EXAMPLES_PER_UPDATE:
             raise ValueError(f"Incomplete {arm} schedule, expected {count} positions")
         self.rows = [slots[index] for index in range(count)]
+        for offset in range(0, count, EXAMPLES_PER_UPDATE):
+            if len({row[0] for row in self.rows[offset:offset + EXAMPLES_PER_UPDATE]}) != EXAMPLES_PER_UPDATE:
+                raise ValueError(f"Repeated case within a batch at draw {offset}")
+        if milestones:
+            boundary = milestones[0] * EXAMPLES_PER_UPDATE
+            if count != 2 * boundary or self.rows[:boundary] != self.rows[boundary:]:
+                raise ValueError(f"{arm} must repeat its exact first-pass draw order")
         if longest:
-            self.rows = sorted(self.rows, key=lambda row: (-row[2], row[0]))[:EXAMPLES_PER_UPDATE]
+            unique = {row[0]: row for row in self.rows}
+            self.rows = sorted(unique.values(), key=lambda row: (-row[2], row[0]))[:EXAMPLES_PER_UPDATE]
+        if probe:
+            largest = sorted(probe_rows, key=lambda row: (-row[2], row[0]))
+            target = min(probe_rows, key=lambda row: (-row[4], row[0]))
+            companion = next(row for row in largest if row[0] != target[0])
+            self.rows = [*largest[:EXAMPLES_PER_UPDATE], target, companion]
         self.sha256 = sha256(compact([row[0] for row in self.rows]).encode()).hexdigest()
 
     def batch(self, stream, offset, size):
@@ -87,7 +117,7 @@ class Schedule:
         if len(selected) != size:
             raise ValueError("Incomplete scheduled update")
         batch = []
-        for case_id, position, _, expected_line in selected:
+        for case_id, position, _, expected_line, _ in selected:
             stream.seek(position)
             line = stream.readline()
             if sha256(line).digest() != expected_line:
@@ -99,8 +129,11 @@ class Schedule:
         return batch, [row[0] for row in selected]
 
 
-def load_config():
+def load_config(suite="legacy"):
     config = read_json(CONFIG)
+    if suite == "volume":
+        volume = read_json(VOLUME_CONFIG)
+        config = {**config, **volume, "assets": {**config["assets"], **volume["assets"]}}
     architecture = config["architecture"]
     if architecture["id"] != ARCHITECTURE or architecture["context_tokens"] != CONTEXT:
         raise ValueError("This runner supports the declared Volta architecture")
@@ -117,13 +150,40 @@ def select_experiment(config, assets, experiment_id):
     train_record = None
     if training:
         path, record = assets["train"]
-        schedule = Schedule(path, record["sha256"], training["arm"], config["train_rows_per_arm"],
-                            longest=experiment["kind"] == "pilot")
+        probe = experiment["kind"] == "pilot" and "volume" in config
+        schedule = Schedule(path, record["sha256"], training["arm"],
+                            training.get("draws", config["train_rows_per_arm"]),
+                            longest=experiment["kind"] == "pilot" and not probe, probe=probe,
+                            milestones=experiment.get("milestones", ()))
         if len(schedule.rows) != EXAMPLES_PER_UPDATE * training["updates"]:
             raise ValueError("Training budget must match the frozen schedule")
         train_record = dict(record, dataset_id=training["dataset_id"], arm=training["arm"],
                             schedule_sha256=schedule.sha256, rows=len(schedule.rows))
     return experiment, schedule, train_record
+
+
+def volume_experiments(config, assets):
+    volume = config["volume"]
+    pilot_id = volume["pilot"]["id"]
+    baseline_id = volume["baseline"]
+    arm_ids = volume["arms"]
+    if len(arm_ids) != 2 or len({pilot_id, baseline_id, *arm_ids}) != 4:
+        raise ValueError("Volume comparison requires a pilot, baseline and two distinct arms")
+    prepared = {name: select_experiment(config, assets, name) for name in (pilot_id, baseline_id, *arm_ids)}
+    pilot, baseline, left, right = (prepared[name][0] for name in prepared)
+    updates = left["training"]["updates"]
+    milestones = left["milestones"]
+    if (pilot["kind"] != "pilot" or baseline["kind"] != "baseline"
+            or any(arm["kind"] != "comparison" for arm in (left, right))
+            or [left["training"]["arm"], right["training"]["arm"]] != ["narrow", "wide"]
+            or pilot["training"]["updates"] != 2 or volume["pilot"]["updates"] != 2
+            or milestones != right["milestones"] or len(milestones) != 2
+            or type(milestones[0]) is not int or milestones[0] <= 0
+            or milestones != [updates // 2, updates] or updates % 2
+            or right["training"]["updates"] != updates
+            or 2 * updates + pilot["training"]["updates"] > 3246):
+        raise ValueError("Volume arms must have two equal passes and fit the update budget")
+    return prepared, milestones
 
 
 def runtime_identity():
@@ -145,15 +205,23 @@ def runtime_identity():
             "node": subprocess.check_output(["node", "--version"], text=True).strip()}
 
 
-def run_identity(experiment_id, config, experiment, assets, train_record):
+def run_identity(experiment_id, config, experiment, assets, train_record, *, runtime=None):
     code = ["run.py", "model.py", "ledger.py", "evaluate.mjs", "requirements.txt", "experiments.json"]
     code.extend(path.relative_to(ROOT).as_posix() for path in (ROOT / "evaluation").glob("*.mjs"))
+    suite = config.get("volume")
+    if suite:
+        code.append(VOLUME_CONFIG.name)
+    evaluation = dict(assets["dev"][1], split="DEV700", dataset_id=config["evaluation_id"],
+                      registry=assets["registry"][1])
+    recipe = dict(config["recipe"], kind=experiment["kind"], training=experiment.get("training"))
+    if suite:
+        evaluation.update(split="DEV-VOLUME", suite=suite["evaluation"])
+        recipe.update(milestones=experiment.get("milestones", []), pilot=suite["pilot"])
     return {"experiment_id": experiment_id, "architecture_id": ARCHITECTURE,
             "architecture": config["architecture"], "code": code_record(ROOT, code),
-            "recipe": dict(config["recipe"], kind=experiment["kind"], training=experiment.get("training")),
-            "runtime": runtime_identity(), "train": train_record,
-            "evaluation": dict(assets["dev"][1], split="DEV700", dataset_id=config["evaluation_id"],
-                               registry=assets["registry"][1]),
+            "recipe": recipe,
+            "runtime": runtime_identity() if runtime is None else runtime, "train": train_record,
+            "evaluation": evaluation,
             "base": assets["base"][1], "tokenizer": assets["tokenizer"][1],
             "initial_checkpoint": assets["initial_checkpoint"][1]}
 
@@ -174,32 +242,64 @@ def save_latest(runtime, path, lineage):
         fsync_directory(path.parent)
 
 
+def snapshot(latest, step):
+    path = latest.with_name(f"checkpoint-step-{step}.safetensors")
+    if path.exists():
+        if file_record(latest)["sha256"] != file_record(path)["sha256"]:
+            raise ValueError(f"Milestone {step} already contains a different checkpoint")
+    else:
+        os.link(latest, path)
+        fsync_directory(path.parent)
+    return path
+
+
 def require_pilot(runs, pilot_run_id, identity):
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}", pilot_run_id):
         raise ValueError("Invalid pilot run ID")
     path = runs / pilot_run_id
     manifest = read_json(path / "run.json")
     recorded = manifest["identity"]
+    pilot = identity["recipe"].get("pilot", {"id": PILOT_EXPERIMENT, "updates": 1})
     keys = ("architecture_id", "base", "initial_checkpoint", "tokenizer", "code", "runtime")
-    if any(identity[key] != recorded[key] for key in keys) or recorded["experiment_id"] != PILOT_EXPERIMENT:
+    if any(identity[key] != recorded[key] for key in keys) or recorded["experiment_id"] != pilot["id"]:
         raise ValueError("The pilot must use this code, checkpoint and runtime")
     if recorded["train"]["sha256"] != identity["train"]["sha256"]:
         raise ValueError("The pilot must use this frozen TRAIN source")
     checkpoint = file_record(path / "checkpoint.safetensors")
     verified = False
+    measurements = {}
     with (path / "events.jsonl").open() as stream:
         for line in stream:
             if not line.endswith("\n"):
                 break
             event = json.loads(line)
+            if event["event"] == "update":
+                measurement = event["details"]
+                measurements[measurement["step"]] = measurement
             if event["event"] == "pilot_reload_verified":
                 verified = (event["details"]["checkpoint"] == checkpoint
-                            and event["details"]["step"] == identity["recipe"]["initial_step"] + 1)
+                            and event["details"]["step"] == identity["recipe"]["initial_step"] + pilot["updates"])
     if not verified:
         raise ValueError("Complete the pilot save and reload before training an experimental arm")
+    return list(measurements.values())
 
 
-def train(args, identity, experiment, assets, schedule):
+def check_deadline(deadline):
+    if deadline is not None and time() >= deadline:
+        raise RuntimeError("Comparison time budget exhausted. Saved checkpoints and completed evaluations remain available.")
+
+
+def verify_frozen_inputs(identity, assets, names):
+    for entry in identity["code"]["files"]:
+        if file_record(ROOT / entry["path"], relative_to=ROOT) != entry:
+            raise ValueError(f"Experiment source changed: {entry['path']}")
+    for name in names:
+        path, record = assets[name]
+        if file_record(path, relative_to=ROOT) != record:
+            raise ValueError(f"Experiment input changed: {record['path']}")
+
+
+def train(args, identity, experiment, assets, schedule, *, until=None, lease_held=False, deadline=None):
     import torch
     from model import LAYERS, LEARNING_RATE, LOSS_SCALE, Runtime
 
@@ -209,7 +309,15 @@ def train(args, identity, experiment, assets, schedule):
         raise ValueError("The experiment must declare the runtime's training recipe")
     if experiment["kind"] == "comparison":
         require_pilot(args.runs, args.pilot_run_id, identity)
-    with open_run(args.runs, args.run_id, identity, resume=args.resume) as run:
+    milestones = experiment.get("milestones", ())
+    updates = experiment["training"]["updates"]
+    limit = updates if until is None else until
+    if until is not None and until not in milestones:
+        raise ValueError("Training can pause only at a declared milestone")
+    check_deadline(deadline)
+    if lease_held:
+        verify_frozen_inputs(identity, assets, ("base", "initial_checkpoint", "train"))
+    with open_run(args.runs, args.run_id, identity, resume=args.resume, lease_held=lease_held) as run:
         initial = assets["initial_checkpoint"][0]
         latest = run.path / "checkpoint.safetensors"
         checkpoint = latest if args.resume and latest.exists() else initial
@@ -222,15 +330,19 @@ def train(args, identity, experiment, assets, schedule):
             raise ValueError("The saved checkpoint belongs to another run")
         initial_step = identity["recipe"]["initial_step"]
         done = runtime.step - initial_step
-        updates = experiment["training"]["updates"]
         save_every = identity["recipe"]["checkpoint_interval"]
         if type(save_every) is not int or save_every < 1:
             raise ValueError("Checkpoint interval must be positive")
         if not 0 <= done <= updates or (checkpoint == initial and done != 0):
             raise ValueError("Checkpoint step is outside the scheduled interval")
+        if done > limit:
+            raise ValueError("Cannot retrain an earlier milestone from a later cursor")
         run.event("checkpoint_loaded", step=runtime.step, file=checkpoint.name)
+        if done in milestones:
+            snapshot(latest, runtime.step)
         with schedule.path.open("rb") as stream:
-            for update in range(done, updates):
+            for update in range(done, limit):
+                check_deadline(deadline)
                 batch, case_ids = schedule.batch(stream, EXAMPLES_PER_UPDATE * update, EXAMPLES_PER_UPDATE)
                 torch.cuda.reset_peak_memory_stats()
                 began = monotonic()
@@ -241,9 +353,12 @@ def train(args, identity, experiment, assets, schedule):
                 elapsed = monotonic() - began
                 if runtime.step != initial_step + update + 1:
                     raise RuntimeError("Runtime cursor did not advance by one update")
-                checkpoint_saved = (update + 1) % save_every == 0 or update + 1 == updates
+                at_milestone = update + 1 in milestones
+                checkpoint_saved = (update + 1) % save_every == 0 or update + 1 == limit or at_milestone
                 if checkpoint_saved:
                     save_latest(runtime, latest, lineage)
+                    if at_milestone:
+                        snapshot(latest, runtime.step)
                 run.event("update", step=runtime.step, loss=loss, seconds=elapsed, case_ids=case_ids,
                           peak_allocated_bytes=torch.cuda.max_memory_allocated(),
                           checkpoint_saved=checkpoint_saved)
@@ -257,7 +372,7 @@ def train(args, identity, experiment, assets, schedule):
             run.event("pilot_reload_verified", step=restored.step, checkpoint=file_record(latest))
 
 
-def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observations):
+def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observations, *, suite=None, deadline=None):
     from tokenizers import Tokenizer
 
     tokenizer = Tokenizer.from_file(str(tokenizer_path))
@@ -266,6 +381,9 @@ def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observation
     if tokenizer.decode([STOP_TOKEN], skip_special_tokens=False) != "<start_function_response>":
         raise ValueError("Tokenizer terminal token differs")
     command = ["node", str(ROOT / "evaluate.mjs"), str(registry_path), str(dev_path), str(observations)]
+    expected = 700 if suite is None else suite["cases"]
+    if suite is not None:
+        command.append(compact(suite))
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           text=True, encoding="utf-8") as process:
         score = None
@@ -277,6 +395,7 @@ def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observation
                     continue
                 if score is not None or message["kind"] != "generate":
                     raise ValueError("Unexpected evaluation request")
+                check_deadline(deadline)
                 tokens = tokenizer.encode(message["prompt"], add_special_tokens=False).ids
                 if not 0 < len(tokens) <= CONTEXT - TARGET_LIMIT:
                     raise ValueError(f"Complete prompt does not fit for {message['case_id']}")
@@ -284,61 +403,270 @@ def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observation
                 raw_text = tokenizer.decode(raw_ids, skip_special_tokens=False)
                 process.stdin.write(compact({"raw_ids": raw_ids, "raw_text": raw_text}) + "\n")
                 process.stdin.flush()
-            if process.wait() != 0 or score is None or score["aborted"] or score["observed_records"] != 700:
-                raise RuntimeError("DEV700 did not complete. Inspect the observations and run log.")
+            if process.wait() != 0 or score is None or score["aborted"] or score["observed_records"] != expected:
+                raise RuntimeError("The development evaluation did not complete. Inspect the observations and run log.")
             return score
         except BaseException:
             process.kill()
             raise
 
 
-def test(args, identity, experiment, assets):
+def test(args, identity, experiment, assets, *, at=None, lease_held=False, deadline=None):
     from model import Runtime
 
     baseline = experiment["kind"] == "baseline"
-    if experiment["kind"] == "pilot":
-        raise ValueError("Use the reference or an experimental arm for DEV700")
+    if experiment["kind"] == "pilot" or (at is not None and at not in experiment.get("milestones", ())):
+        raise ValueError("Evaluation requires a reference or declared training checkpoint")
+    suite = identity["evaluation"].get("suite")
+    initial_step = identity["recipe"]["initial_step"]
+    expected_step = initial_step + (0 if baseline else at if at is not None else experiment["training"]["updates"])
+    checkpoint_name = f"checkpoint-step-{expected_step}.safetensors" if at is not None else "checkpoint.safetensors"
+    result_name = f"result-step-{expected_step}.json" if at is not None else "result.json"
     resume = not baseline or (args.runs / args.run_id / "run.json").exists()
-    with open_run(args.runs, args.run_id, identity, resume=resume, stage="evaluate") as run:
-        checkpoint = assets["initial_checkpoint"][0] if baseline else run.path / "checkpoint.safetensors"
+    check_deadline(deadline)
+    if suite is not None:
+        verify_frozen_inputs(identity, assets, ("base", "initial_checkpoint", "tokenizer", "registry", "dev"))
+    stage = f"evaluate-{expected_step}" if at is not None else "evaluate"
+    with open_run(args.runs, args.run_id, identity, resume=resume, stage=stage, lease_held=lease_held) as run:
+        if (run.path / result_name).exists():
+            raise ValueError("This checkpoint already has a completed evaluation")
+        checkpoint = assets["initial_checkpoint"][0] if baseline else run.path / checkpoint_name
         checkpoint_record = file_record(checkpoint)
         runtime = Runtime(assets["base"][0], checkpoint)
         if runtime.tokenizer_sha256 != assets["tokenizer"][1]["sha256"]:
             raise ValueError("Checkpoint tokenizer differs from the experiment")
-        expected_step = identity["recipe"]["initial_step"]
         if not baseline:
-            expected_step += experiment["training"]["updates"]
             if runtime.lineage.get("identity_sha256") != run.identity_sha256:
                 raise ValueError("The saved checkpoint belongs to another run")
         if runtime.step != expected_step:
             raise ValueError(f"Expected completed checkpoint at step {expected_step}, found {runtime.step}")
-        observations = run.path / f"dev700-{time_ns()}.jsonl"
+        prefix = "dev700" if suite is None else f"dev-volume-{expected_step}"
+        observations = run.path / f"{prefix}-{time_ns()}.jsonl"
         run.event("evaluation_started", step=runtime.step, observations=observations.name)
-        score = evaluate_model(runtime, assets["tokenizer"][0], assets["registry"][0], assets["dev"][0], observations)
+        began = monotonic()
+        score = evaluate_model(runtime, assets["tokenizer"][0], assets["registry"][0], assets["dev"][0],
+                               observations, suite=suite, deadline=deadline)
+        if suite is not None:
+            verify_frozen_inputs(identity, assets, ("tokenizer", "registry", "dev"))
         if file_record(checkpoint) != checkpoint_record:
             raise ValueError("Checkpoint changed during evaluation")
-        run.write_result(score["summary"], checkpoint_record, step=runtime.step,
+        run.write_result(score["summary"], checkpoint_record, name=result_name, step=runtime.step,
                          generated_cases=score["generated_cases"], observed_records=score["observed_records"],
-                         observations=file_record(observations))
+                         observations=file_record(observations),
+                         **({"seconds": monotonic() - began} if suite is not None else {}))
         print(json.dumps(score["summary"], indent=2))
 
 
-def check():
-    config, assets = load_config()
-    for experiment_id in config["experiments"]:
-        _, schedule, record = select_experiment(config, assets, experiment_id)
+def check_evaluation(config, assets):
+    command = ["node", str(ROOT / "evaluate.mjs"), str(assets["registry"][0]), str(assets["dev"][0]), "--check"]
+    if "volume" in config:
+        command.append(compact(config["volume"]["evaluation"]))
+    subprocess.run(command, check=True)
+
+
+def check(suite="legacy"):
+    config, assets = load_config(suite)
+    prepared = (volume_experiments(config, assets)[0] if suite == "volume"
+                else {name: select_experiment(config, assets, name) for name in config["experiments"]})
+    for experiment_id, (_, schedule, record) in prepared.items():
         if schedule:
-            print(experiment_id, len(schedule.rows), record["schedule_sha256"])
-    subprocess.run(["node", str(ROOT / "evaluate.mjs"), str(assets["registry"][0]),
-                    str(assets["dev"][0]), "--check"], check=True)
+            print(experiment_id, len(schedule.rows), record["schedule_sha256"], flush=True)
+    check_evaluation(config, assets)
+
+
+def comparison_deadline(directory, hours, identities):
+    binding = sha256(compact(identities).encode()).hexdigest()
+    path = directory / "comparison.json"
+    if path.exists():
+        record = read_json(path)
+        if record["identity_sha256"] != binding or (hours is not None and hours != record["hours"]):
+            raise ValueError("Comparison identity or time budget changed. Use a fresh comparison ID.")
+    else:
+        hours = 36 if hours is None else hours
+        if not isfinite(hours) or not 0 < hours <= 36:
+            raise ValueError("Comparison budget must be positive and at most 36 hours")
+        record = {"identity_sha256": binding, "hours": hours, "started_at_unix": time()}
+        directory.mkdir(exist_ok=True)
+        publish_json(path, record)
+    return record["started_at_unix"] + 3600 * record["hours"]
+
+
+def volume_evaluation(job, identity, experiment, assets, *, at=None, deadline):
+    initial_step = identity["recipe"]["initial_step"]
+    path = job.runs / job.run_id
+    step = initial_step if at is None else initial_step + at
+    name = "result.json" if at is None else f"result-step-{step}.json"
+    result = read_result(path, name, identity=identity)
+    if result is None:
+        test(job, identity, experiment, assets, at=at, lease_held=True, deadline=deadline)
+        result = read_result(path, name, identity=identity)
+    details = result["details"]
+    checkpoint = assets["initial_checkpoint"][0] if at is None else path / f"checkpoint-step-{step}.safetensors"
+    observations = path / details["observations"]["path"]
+    if (observations.parent != path or result["checkpoint"] != file_record(checkpoint)
+            or details["step"] != step or details["observed_records"] != identity["evaluation"]["suite"]["cases"]
+            or result["metrics"]["missing"] != 0 or details["observations"] != file_record(observations)):
+        raise ValueError(f"Incomplete or changed evaluation for {job.run_id} at {step}")
+    return result
+
+
+def observed_outcomes(runs, result):
+    path = runs / result["run_id"] / result["details"]["observations"]["path"]
+    outcomes = {}
+    with path.open() as stream:
+        for line in stream:
+            record = json.loads(line)
+            case = record["case_id"]
+            if case in outcomes:
+                raise ValueError(f"Repeated observed case {case}")
+            outcome = record["result"]
+            outcomes[case] = outcome["success"] and outcome["critical_status"] == "none_observed"
+    if len(outcomes) != result["details"]["observed_records"]:
+        raise ValueError("Observed cases do not match the evaluation receipt")
+    return outcomes
+
+
+def paired_outcomes(plan, narrow, wide):
+    def wins(left, right):
+        return {"wide_only": sum(r and not l for l, r in zip(left, right)),
+                "narrow_only": sum(l and not r for l, r in zip(left, right))}
+
+    if set(narrow) != set(wide) or set(narrow) != {row["case_id"] for row in plan}:
+        raise ValueError("The comparison evaluated different development questions")
+    result = {}
+    dialogues = {}
+    for cohort in ("supported", "outside_scope"):
+        ids = [row["case_id"] for row in plan if row["cohort"] == cohort]
+        result[cohort] = wins([narrow[key] for key in ids], [wide[key] for key in ids])
+    for row in plan:
+        if row.get("dialogue_id"):
+            dialogues.setdefault(row["dialogue_id"], []).append(row["case_id"])
+    result["whole_dialogues"] = wins(
+        [all(narrow[key] for key in ids) for ids in dialogues.values()],
+        [all(wide[key] for key in ids) for ids in dialogues.values()],
+    )
+    return result
+
+
+def saved_updates(path, initial_step):
+    events = path / "events.jsonl"
+    if not (path / "checkpoint.safetensors").is_file() or not events.is_file():
+        return 0
+    step = initial_step
+    with events.open("rb") as stream:
+        for line in stream:
+            if not line.endswith(b"\n"):
+                break
+            event = json.loads(line)
+            if event["event"] == "update" and event["details"]["checkpoint_saved"]:
+                step = max(step, event["details"]["step"])
+    return step - initial_step
+
+
+def admit_round(runs, run_ids, initial_step, milestone, pilot, baseline, deadline):
+    expected_updates = 0
+    evaluations = 0
+    for name in run_ids:
+        path = runs / name
+        step = initial_step + milestone
+        if (path / f"result-step-{step}.json").is_file():
+            continue
+        evaluations += 1
+        if not (path / f"checkpoint-step-{step}.safetensors").is_file():
+            expected_updates += max(0, milestone - saved_updates(path, initial_step))
+    if not evaluations:
+        return
+    if disk_usage(runs).free < 3_000_000_000:
+        raise RuntimeError("Free at least 3 GB in the run filesystem before starting this comparison round")
+    step_seconds = max(item["seconds"] for item in pilot)
+    evaluate_seconds = baseline["details"]["seconds"]
+    estimated = 1.15 * (expected_updates * step_seconds + evaluations * evaluate_seconds) + 120 * evaluations
+    if time() + estimated >= deadline:
+        raise RuntimeError(f"Remaining time cannot fit both arms and their DEV checks (estimate {estimated / 3600:.1f} h)")
+
+
+def volume_compare(args):
+    if not SAFE_ID.fullmatch(args.run_id) or len(args.run_id) > 80:
+        raise ValueError("Invalid comparison ID")
+    config, assets = load_config("volume")
+    prepared, milestones = volume_experiments(config, assets)
+    volume = config["volume"]
+    pilot_id = volume["pilot"]["id"]
+    baseline_id = volume["baseline"]
+    arm_ids = volume["arms"]
+    pilot_run = f"{args.run_id}-{pilot_id}"
+    check_evaluation(config, assets)
+    runtime = runtime_identity()
+    identities = {name: run_identity(name, config, experiment, assets, record, runtime=runtime)
+                  for name, (experiment, _, record) in prepared.items()}
+    with execution_lease(args.runs):
+        directory = args.runs / args.run_id
+        if (not (directory / f"comparison-{milestones[args.rounds - 1]}.json").is_file()
+                and disk_usage(args.runs).free < 3_000_000_000):
+            raise RuntimeError("Free at least 3 GB in the run filesystem before starting the pilot and evaluations")
+        deadline = comparison_deadline(directory, args.hours, identities)
+
+        def job(name):
+            run_id = f"{args.run_id}-{name}"
+            return SimpleNamespace(runs=args.runs, run_id=run_id, pilot_run_id=pilot_run,
+                                   resume=(args.runs / run_id / "run.json").is_file())
+
+        pilot, pilot_schedule, _ = prepared[pilot_id]
+        try:
+            measurements = require_pilot(args.runs, pilot_run, identities[arm_ids[0]])
+        except (FileNotFoundError, ValueError):
+            train(job(pilot_id), identities[pilot_id], pilot, assets, pilot_schedule,
+                  lease_held=True, deadline=deadline)
+            measurements = require_pilot(args.runs, pilot_run, identities[arm_ids[0]])
+        if (len(measurements) != volume["pilot"]["updates"]
+                or any(not isfinite(item["seconds"]) or item["seconds"] <= 0 or item["peak_allocated_bytes"] <= 0
+                       for item in measurements)):
+            raise ValueError("Pilot is missing update timing or memory evidence")
+        baseline = volume_evaluation(job(baseline_id), identities[baseline_id], prepared[baseline_id][0],
+                                     assets, deadline=deadline)
+        baseline_ids = observed_outcomes(args.runs, baseline).keys()
+        with assets["dev"][0].open() as stream:
+            plan = [json.loads(line) for line in stream]
+        for milestone in milestones[:args.rounds]:
+            admit_round(args.runs, [job(name).run_id for name in arm_ids], config["recipe"]["initial_step"],
+                        milestone, measurements, baseline, deadline)
+            arms = []
+            for name in arm_ids:
+                experiment, schedule, _ = prepared[name]
+                run_job = job(name)
+                step = config["recipe"]["initial_step"] + milestone
+                checkpoint = args.runs / run_job.run_id / f"checkpoint-step-{step}.safetensors"
+                if not checkpoint.exists():
+                    train(run_job, identities[name], experiment, assets, schedule, until=milestone,
+                          lease_held=True, deadline=deadline)
+                arms.append(volume_evaluation(run_job, identities[name], experiment, assets, at=milestone,
+                                              deadline=deadline))
+            narrow, wide = (observed_outcomes(args.runs, result) for result in arms)
+            if narrow.keys() != baseline_ids:
+                raise ValueError("The comparison evaluated different development questions")
+            summary = {"updates_per_arm": milestone, "baseline": baseline,
+                       "narrow": arms[0], "wide": arms[1], "paired": paired_outcomes(plan, narrow, wide),
+                       "quality_status": "automatic_screening_pending_independent_review"}
+            path = directory / f"comparison-{milestone}.json"
+            if path.exists():
+                if read_json(path) != summary:
+                    raise ValueError(f"Previously saved comparison changed at {milestone} updates")
+            else:
+                publish_json(path, summary)
+            print(f"Paired DEV comparison saved to {path}", flush=True)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=Path, default=ROOT / "runs", help="Shared run directory")
+    parser.add_argument("--suite", choices=("legacy", "volume"), default="legacy")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check")
     commands.add_parser("report")
+    comparison = commands.add_parser("compare")
+    comparison.add_argument("--run-id", default="train-volume-v1")
+    comparison.add_argument("--rounds", type=int, choices=(1, 2), default=1)
+    comparison.add_argument("--hours", type=float, help="Fixed time budget for the comparison, up to 36 hours")
     training = commands.add_parser("train")
     evaluation = commands.add_parser("test")
     for command in (training, evaluation):
@@ -351,8 +679,12 @@ def main():
     if args.command == "report":
         print(json.dumps(report(args.runs), indent=2))
     elif args.command == "check":
-        check()
+        check(args.suite)
+    elif args.command == "compare":
+        volume_compare(args)
     else:
+        if args.suite == "volume":
+            parser.error("Use compare for the volume suite")
         args.run_id = args.run_id or args.experiment
         config, assets = load_config()
         experiment, schedule, train_record = select_experiment(config, assets, args.experiment)

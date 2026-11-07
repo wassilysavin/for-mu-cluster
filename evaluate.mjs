@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { open, readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 
-import { evaluateDevelopment } from './evaluation/development-evaluator.mjs';
+import { evaluateDevelopment, validateDevelopmentPlan } from './evaluation/development-evaluator.mjs';
 import { buildModelInput, pinnedTokenizerSha256 } from './evaluation/model-input.mjs';
 import { IncompleteModelOutput } from './evaluation/model-result.mjs';
 import { createRegistry } from './evaluation/registry.mjs';
@@ -11,31 +11,37 @@ import { createRegistry } from './evaluation/registry.mjs';
 const STOP_TOKEN = 50;
 const COMPLETION_LIMIT = 512;
 const sha = text => createHash('sha256').update(text).digest('hex');
+const legacy = { cases: 700, supported: 600, outside_scope: 100, dialogues: 60, dialogue_version: 1 };
 
-function sessionIdFor(id) {
-  const hex = sha(`gemprf/cluster/dev700/session-v1/${id}`);
+function sessionIdFor(id, spec) {
+  const suite = spec.dialogue_version === 1 ? 'dev700/session-v1' : `${spec.id}/session-v2`;
+  const hex = sha(`gemprf/cluster/${suite}/${id}`);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-async function loadSuite(registryPath, devPath) {
+async function loadSuite(registryPath, devPath, spec) {
+  assert.ok([1, 2].includes(spec.dialogue_version));
+  assert.equal(spec.supported + spec.outside_scope, spec.cases);
+  if (spec.dialogue_version === 2) assert.match(spec.id, /^dev-volume-[a-z0-9-]+$/);
   const source = JSON.parse(await readFile(registryPath, 'utf8'));
   const registry = createRegistry(source.knowledge, source.contracts);
   assert.equal(await registry.fingerprint(), source.fingerprint);
   const rows = (await readFile(devPath, 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
-  assert.equal(rows.length, 700);
+  assert.equal(rows.length, spec.cases);
   assert.equal(new Set(rows.map(row => row.case_id)).size, rows.length);
-  assert.equal(rows.filter(row => row.cohort === 'supported').length, 600);
-  assert.equal(new Set(rows.flatMap(row => row.dialogue_id ? [row.dialogue_id] : [])).size, 60);
-  assert.ok(rows.every(row => row.split === 'dev' && row.review.registry_sha256 === source.fingerprint));
+  assert.equal(rows.filter(row => row.cohort === 'supported').length, spec.supported);
+  assert.equal(rows.filter(row => row.cohort === 'outside_scope').length, spec.outside_scope);
+  assert.equal(new Set(rows.flatMap(row => row.dialogue_id ? [row.dialogue_id] : [])).size, spec.dialogues);
+  await validateDevelopmentPlan(registry, rows, { split: 'dev', dialogueVersion: spec.dialogue_version });
   const reviews = new Map();
-  for (const verdict of source.actual_history_reviews) {
+  for (const verdict of spec.dialogue_version === 1 ? source.actual_history_reviews : []) {
     assert.equal(verdict.registry_sha256, source.fingerprint);
     assert.equal(verdict.independence.current_question_candidate_output_read, false);
     const key = `${verdict.case_id}:${verdict.before_visible_history_sha256}`;
     assert.ok(!reviews.has(key));
     reviews.set(key, verdict);
   }
-  return { registry, rows, reviews };
+  return { registry, rows, reviews, spec };
 }
 
 async function renderPrompt(registry, session, question) {
@@ -71,7 +77,8 @@ async function evaluate(suite, observationsPath) {
   try {
     const score = await evaluateDevelopment(suite.registry, suite.rows, {
       split: 'dev',
-      sessionIdFor,
+      dialogueVersion: suite.spec.dialogue_version,
+      sessionIdFor: id => sessionIdFor(id, suite.spec),
       adjudicate: async request => {
         const verdict = suite.reviews.get(`${request.case_id}:${request.before_visible_history_sha256}`);
         if (!verdict) return { decision: 'review' };
@@ -109,8 +116,8 @@ async function evaluate(suite, observationsPath) {
   }
 }
 
-const [registryPath, devPath, output] = process.argv.slice(2);
-if (!registryPath || !devPath || !output) throw new Error('Expected registry, DEV700, and observations path or --check');
-const suite = await loadSuite(registryPath, devPath);
+const [registryPath, devPath, output, specification] = process.argv.slice(2);
+if (!registryPath || !devPath || !output) throw new Error('Expected registry, development data, and observations path or --check');
+const suite = await loadSuite(registryPath, devPath, specification ? JSON.parse(specification) : legacy);
 if (output === '--check') await send({ kind: 'check', cases: suite.rows.length, history_reviews: suite.reviews.size });
 else await evaluate(suite, output);

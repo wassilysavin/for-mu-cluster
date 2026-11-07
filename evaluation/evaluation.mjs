@@ -25,6 +25,7 @@ export async function gradeTurn(registry, before, after, gold, observation) {
   const failure = (reasons, critical = 'review_required') => ({ case_id: gold.case_id,
     success: false, reasons, critical_status: critical, observation_origin: origin });
   if (before.registry_id !== after.registry_id || before.session_id !== after.session_id ||
+      before.dialogue_version !== after.dialogue_version ||
       after.exchanges.length !== before.exchanges.length + 1 ||
       !same(after.exchanges.slice(0, -1), before.exchanges)) {
     return failure(['actual_history_rewritten_or_exchange_missing'], 'detected');
