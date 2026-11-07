@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "architecture": {
+    "id": "functiongemma270m-lora16-volta-fp16-v1",
+    "base_model": "google/functiongemma-270m-it",
+    "layers": 18,
+    "context_tokens": 32768,
+    "frozen_base": "MLX affine 4-bit, dequantized to FP16 for execution",
+    "trainable_parameters": "LoRA rank 16, FP32 master weights",
+    "backend": "PyTorch 2.7.1 CUDA 11.8 on NVIDIA V100"
+  },
+  "recipe": {
+    "initial_step": 4847,
+    "examples_per_update": 2,
+    "loss": "mean cross entropy across supervised completion tokens",
+    "optimizer": "factored Adafactor, FP32 state imported from step 4847",
+    "learning_rate": 0.0001,
+    "checkpoint_interval": 10,
+    "loss_scale": 128,
+    "order": "fixed positions in TRAIN, no shuffle",
+    "generation": "greedy, terminal token 50, cap 512, actual conversation history"
+  },
+  "evaluation_id": "dev700-frozen-actual-history-fixed-sessions-v1",
+  "train_rows_per_arm": 760,
+  "assets": {
+    "base": {
+      "path": "assets/functiongemma-270m-mlx-4bit.safetensors",
+      "sha256": "7f0ec40bcc88db6f578e777e018d335875bb5dca956a3ab30dbd0b737e5240af"
+    },
+    "initial_checkpoint": {
+      "path": "assets/checkpoint-step-4847.safetensors",
+      "sha256": "14cf0edfe65f12b556f415ecf65bf220d52335c7eb1536038c9e77270ec70463"
+    },
+    "tokenizer": {
+      "path": "assets/tokenizer.json",
+      "sha256": "b6b09a0b4a803ad453063ca4bb49a784540e8120004e2450e025df2b27d41fb2"
+    },
+    "train": {
+      "path": "assets/train-coverage-replay-v2.jsonl",
+      "sha256": "394d37e2560dc8c3c1eaa06b949f1f2bcf806a460ed1f1f2c48777d088d475d5"
+    },
+    "dev": {
+      "path": "assets/dev700.jsonl",
+      "sha256": "de732fad2ff49daacbc84730d87097df795849c7b5112c254d1186579513b67b"
+    },
+    "registry": {
+      "path": "assets/registry.json",
+      "sha256": "b006fbacf4fd0f7f423b9178c7f365e98a6cc91bc99d8c9a16277bfd5954d4d0"
+    }
+  },
+  "train_comparison": {
+    "hypothesis": "Replacing matched older wordings with independently reviewed new wordings improves complete DEV answers while preserving other capabilities.",
+    "adopt_if": "More complete supported answers than control, with no regressions in whole dialogues, outside-scope handling, independently detected critical errors, or unresolved history reviews.",
+    "matching": "Same ordered calls and typed arguments, same history class and negation markers, nearest token lengths",
+    "shared_examples": 668,
+    "replaced_examples": 92,
+    "new_history_examples": 0,
+    "functions_per_arm": 97,
+    "outside_scope_per_arm": 84,
+    "clarifications_per_arm": 40,
+    "original_train_index_sha256": "411522b7af1cba9466d4456f2a1422f060314a174ccd9a70c1ceb5a9267ff3bb",
+    "reviewed_additions_manifest_sha256": "c2f2fde9ae07674ef83a0935e0bc45a8d45ea76a5c685845897642151a919555",
+    "reviewed_addition_token_index_sha256": "ff476f4cf9684aaec652d20abbde9428c71357f21c067729b0361c6570d54ec3"
+  },
+  "experiments": {
+    "pilot-4847": {
+      "kind": "pilot",
+      "training": {"arm": "treatment", "dataset_id": "replay-v2-longest-two", "updates": 1}
+    },
+    "baseline-4847": {
+      "kind": "baseline"
+    },
+    "replay-control": {
+      "kind": "comparison",
+      "training": {"arm": "control", "dataset_id": "replay-v2-original-wordings", "updates": 380}
+    },
+    "replay-treatment": {
+      "kind": "comparison",
+      "training": {"arm": "treatment", "dataset_id": "replay-v2-matched-new-wordings", "updates": 380}
+    }
+  }
+}
