@@ -22,7 +22,7 @@ LAYERS, WIDTH, HEADS, HEAD_DIM, VOCAB = 18, 640, 4, 256, 262144
 WINDOW, CONTEXT, GROUP, RANK = 512, 32768, 64, 16
 LORA_SCALE, LOSS_SCALE, LEARNING_RATE = 2.0, 128.0, 1e-4
 SOURCE_FORMAT = "gemprf-mlx-checkpoint-handoff-v1"
-RUN_FORMAT = "gemprf-torch-volta-checkpoint-v1"
+RUN_FORMAT = "gemprf-torch-volta-fp32-checkpoint-v2"
 OPTIMIZER_POLICY = {
     "optimizer": "functional-fp32-factored-adafactor-v1",
     "peak_learning_rate": LEARNING_RATE, "warmup_updates": 54,
@@ -111,7 +111,7 @@ def load_base(path: Path, manifest: dict, device: torch.device) -> dict[str, tor
                     or scales.get_shape() != [rows, cols // GROUP]
                     or biases.get_shape() != scales.get_shape()):
                 raise ValueError(f"Wrong frozen matrix shape: {name}")
-            dense = torch.empty((rows, cols), dtype=torch.float16)
+            dense = torch.empty((rows, cols), dtype=torch.float32)
             for start in range(0, rows, 2048):
                 part = slice(start, min(start + 2048, rows))
                 dense[part] = decode_affine(packed[part], scales[part], biases[part])
@@ -201,14 +201,13 @@ class Runtime:
         self.base = load_base(Path(base_path), json.loads(self._metadata["base_model_manifest"]), self.device)
 
     def _linear(self, value, path):
-        frozen = F.linear(value, self.base[path]).float()
-        adjusted = F.linear(F.linear(value.float(), self.parameters[f"{path}.lora_A"]),
+        frozen = F.linear(value, self.base[path])
+        adjusted = F.linear(F.linear(value, self.parameters[f"{path}.lora_A"]),
                             self.parameters[f"{path}.lora_B"])
-        return (frozen + LORA_SCALE * adjusted).half()
+        return frozen + LORA_SCALE * adjusted
 
     def _norm(self, value, path):
-        value = value.float()
-        return (value * (value.square().mean(-1, keepdim=True) + 1e-6).rsqrt() * self.base[path]).half()
+        return value * (value.square().mean(-1, keepdim=True) + 1e-6).rsqrt() * self.base[path]
 
     def _rope(self, value, offset, local):
         positions = torch.arange(offset, offset + value.shape[2], device=self.device, dtype=torch.float32)
@@ -217,7 +216,7 @@ class Runtime:
         phase = torch.outer(positions, frequencies).repeat(1, 2)
         left, right = value.chunk(2, dim=-1)
         turned = torch.cat((-right, left), dim=-1)
-        return value * phase.cos().half() + turned * phase.sin().half()
+        return value * phase.cos() + turned * phase.sin()
 
     def _qkv(self, value, stem, offset, local):
         def project(key, heads):
@@ -265,7 +264,7 @@ class Runtime:
         projected = self._linear(attended.transpose(1, 2).reshape(1, value.shape[1], -1), f"{stem}.self_attn.o_proj")
         value = value + self._norm(projected, f"{stem}.post_attention_layernorm")
         mlp = self._norm(value, f"{stem}.pre_feedforward_layernorm")
-        gate = F.gelu(self._linear(mlp, f"{stem}.mlp.gate_proj").float(), approximate="tanh").half()
+        gate = F.gelu(self._linear(mlp, f"{stem}.mlp.gate_proj"), approximate="tanh")
         up = self._linear(mlp, f"{stem}.mlp.up_proj")
         down = self._linear(gate * up, f"{stem}.mlp.down_proj")
         value = value + self._norm(down, f"{stem}.post_feedforward_layernorm")
@@ -280,12 +279,15 @@ class Runtime:
         return F.embedding(ids, self.base[EMBEDDING]) * 25.25
 
     def _logits(self, hidden):
-        return F.linear(self._norm(hidden, "model.norm"), self.base[EMBEDDING]).float()
+        return F.linear(self._norm(hidden, "model.norm"), self.base[EMBEDDING])
 
     def _loss_sum(self, prompt: list[int], completion: list[int]):
         hidden = self._embed(prompt + completion[:-1])
+        check_layers = self.step == self.initial_step
         for layer in range(LAYERS):
             hidden = checkpoint(self._layer, hidden, layer, use_reentrant=False, preserve_rng_state=False)
+            if check_layers and not torch.isfinite(hidden).all().item():
+                raise FloatingPointError(f"Nonfinite activation after layer {layer + 1}")
         hidden = hidden[:, -len(completion):]
         targets = torch.tensor(completion, device=self.device, dtype=torch.long)
         return F.cross_entropy(self._logits(hidden)[0], targets, reduction="sum")
@@ -305,13 +307,16 @@ class Runtime:
         count = sum(len(completion) for _, completion in examples)
         losses = []
         try:
-            for prompt, completion in examples:
-                loss = self._loss_sum(prompt, completion) / count
+            for index, (prompt, completion) in enumerate(examples, start=1):
+                try:
+                    loss = self._loss_sum(prompt, completion) / count
+                except FloatingPointError as error:
+                    raise FloatingPointError(f"Example {index} of {len(examples)}: {error}") from error
+                if not torch.isfinite(loss).item():
+                    raise FloatingPointError(f"Nonfinite target loss in example {index} of {len(examples)}")
                 losses.append(loss.detach())
                 (loss * LOSS_SCALE).backward()
             mean_loss = torch.stack(losses).sum().item()
-            if not torch.stack([torch.isfinite(loss) for loss in losses]).all().item():
-                raise FloatingPointError("Nonfinite target loss")
             self._update()
             return mean_loss
         finally:

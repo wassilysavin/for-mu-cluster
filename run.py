@@ -18,7 +18,8 @@ from ledger import code_record, file_record, open_run, report
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "experiments.json"
-ARCHITECTURE = "functiongemma270m-lora16-volta-fp16-v1"
+ARCHITECTURE = "functiongemma270m-lora16-volta-fp32-v2"
+PILOT_EXPERIMENT = "pilot-4847-fp32"
 VOCABULARY = 262144
 CONTEXT = 32768
 TARGET_LIMIT = 512
@@ -180,7 +181,7 @@ def require_pilot(runs, pilot_run_id, identity):
     manifest = read_json(path / "run.json")
     recorded = manifest["identity"]
     keys = ("architecture_id", "base", "initial_checkpoint", "tokenizer", "code", "runtime")
-    if any(identity[key] != recorded[key] for key in keys) or recorded["experiment_id"] != "pilot-4847":
+    if any(identity[key] != recorded[key] for key in keys) or recorded["experiment_id"] != PILOT_EXPERIMENT:
         raise ValueError("The pilot must use this code, checkpoint and runtime")
     if recorded["train"]["sha256"] != identity["train"]["sha256"]:
         raise ValueError("The pilot must use this frozen TRAIN source")
@@ -233,7 +234,10 @@ def train(args, identity, experiment, assets, schedule):
                 batch, case_ids = schedule.batch(stream, EXAMPLES_PER_UPDATE * update, EXAMPLES_PER_UPDATE)
                 torch.cuda.reset_peak_memory_stats()
                 began = monotonic()
-                loss = runtime.train_step(batch)
+                try:
+                    loss = runtime.train_step(batch)
+                except FloatingPointError as error:
+                    raise FloatingPointError(f"{', '.join(case_ids)}: {error}") from error
                 elapsed = monotonic() - began
                 if runtime.step != initial_step + update + 1:
                     raise RuntimeError("Runtime cursor did not advance by one update")
@@ -341,7 +345,7 @@ def main():
         command.add_argument("experiment")
         command.add_argument("--run-id")
     training.add_argument("--resume", action="store_true")
-    training.add_argument("--pilot-run-id", default="pilot-4847")
+    training.add_argument("--pilot-run-id", default=PILOT_EXPERIMENT)
     args = parser.parse_args()
     args.runs = args.runs.resolve()
     if args.command == "report":
@@ -362,5 +366,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, RuntimeError, ImportError, KeyError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, RuntimeError, FloatingPointError, ImportError, KeyError, subprocess.CalledProcessError) as error:
         sys.exit(f"Error: {error}")

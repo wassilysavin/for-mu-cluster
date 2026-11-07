@@ -31,7 +31,7 @@ The repository attributes use Git LFS for weights and TRAIN. Use and distributio
 ## Run on the GPU
 
 ```sh
-python run.py train pilot-4847
+python run.py train pilot-4847-fp32
 python run.py test baseline-4847
 python run.py train replay-control
 python run.py test replay-control
@@ -40,7 +40,7 @@ python run.py test replay-treatment
 python run.py report
 ```
 
-The pilot runs one update using the two longest examples and verifies the saved checkpoint by reloading it. It records time and peak allocated GPU memory. For interrupted training, rerun the same command with `--resume`. The saved checkpoint advances every ten updates and at the final update. Use `--run-id NAME` for a new replicate and the same ID for its evaluation. To use a pilot with a custom run ID, pass `--pilot-run-id NAME` when training either arm.
+The pilot runs one FP32 update using the two longest examples and verifies the saved checkpoint by reloading it. It records time and peak allocated GPU memory. The first FP16 pilot produced a nonfinite loss. Use `pilot-4847-fp32` for the new runtime and keep the original run log for comparison. For interrupted training with the same runtime, rerun the command with `--resume`. Checkpoints are saved every ten updates and at the final update. Use `--run-id NAME` for a new replicate and the same ID for evaluation. To use a pilot with a custom run ID, pass `--pilot-run-id NAME` when training either arm.
 
 ## Compare runs
 

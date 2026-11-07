@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "architecture": {
-    "id": "functiongemma270m-lora16-volta-fp16-v1",
+    "id": "functiongemma270m-lora16-volta-fp32-v2",
     "base_model": "google/functiongemma-270m-it",
     "layers": 18,
     "context_tokens": 32768,
-    "frozen_base": "MLX affine 4-bit, dequantized to FP16 for execution",
+    "frozen_base": "MLX affine 4-bit, dequantized to FP32 for execution",
     "trainable_parameters": "LoRA rank 16, FP32 master weights",
     "backend": "PyTorch 2.7.1 CUDA 11.8 on NVIDIA V100"
   },
@@ -63,7 +63,7 @@
     "reviewed_addition_token_index_sha256": "ff476f4cf9684aaec652d20abbde9428c71357f21c067729b0361c6570d54ec3"
   },
   "experiments": {
-    "pilot-4847": {
+    "pilot-4847-fp32": {
       "kind": "pilot",
       "training": {"arm": "treatment", "dataset_id": "replay-v2-longest-two", "updates": 1}
     },
