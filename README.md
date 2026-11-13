@@ -1,6 +1,6 @@
 # GEM-pRF Functions cluster runs
 
-This repository contains frozen inputs and a runner for continuing FunctionGemma training from step 4847 on one NVIDIA V100. Both experiment suites require a successful FP32 pilot before training.
+This repository contains frozen inputs and a runner for continuing FunctionGemma training from step 4847 on NVIDIA V100 GPUs. Both experiment suites require a successful FP32 pilot before training. The volume comparison supports one GPU or two concurrent arms on four GPUs.
 
 | File or folder | Purpose |
 | --- | --- |
@@ -51,6 +51,25 @@ python run.py report
 The runner saves the exact checkpoint and the DEV observation log for each milestone. The paired results are in `runs/train-volume-v1/comparison-760.json` and `comparison-1520.json` inside the same directory. Supported answers, outside-scope responses, and whole dialogues have separate paired counts. DEV155 includes 51 standalone supported questions, 16 complete five-turn dialogues, and 24 outside-scope questions. The v2 dialogue contract can replay the displayed answer or error, retry a failed exchange, and clarify an ambiguous reference. Score differences are preliminary until independent review of disputed answers.
 
 Reissue the same command after an interruption to continue from its last saved checkpoint. A comparison holds one execution lock across all stages. Its time budget defaults to 36 elapsed hours from first start, including evaluations and interruptions. You can set a smaller budget at first start with `--hours`. Before each round the runner estimates whether both arms and both DEV checks fit from pilot and baseline timings, with a safety margin. Use the cluster allocation for a hard walltime limit. Keep one checkout and shared run directory during execution.
+
+### Four GPUs
+
+After the previous command has exited, update the checkout and use four V100 GPUs from your cluster allocation:
+
+```sh
+git pull --ff-only
+python run.py compare --gpus 4
+```
+
+The default run ID is `train-volume-v1-4gpu`, separate from the one-GPU comparison. It starts both arms from 4847 and preserves all existing results. New code or GPU layout cannot silently resume an old run identity. Do not update the checkout during an active comparison.
+
+Narrow uses visible GPUs 0 and 1; wide uses 2 and 3. Each pair processes the same two examples per update concurrently, sums gradients normalized by their combined supervised-token count, and applies one Adafactor update. Batch size, learning rate, example order, and checkpoint format remain unchanged. `CUDA_VISIBLE_DEVICES`, if set by your allocation, determines these logical indices. The recorded identity includes the selected devices and execution mode.
+
+Each pair must first match two sequential reference updates for loss, adapter weights, and optimizer state, then save and reload its checkpoint. This hardware pilot is required; CPU fixture checks are not a substitute. After a fresh baseline DEV evaluation, the two training arms run concurrently. Each arm's DEV evaluation runs on its primary GPU with complete dialogues in order, so all four GPUs are used for training, while baseline and evaluation stages use fewer GPUs. Speedup is measured by the pilot rather than assumed to be fourfold.
+
+The first round needs about 718 MiB free, including the 512 MiB reserve, two pilot checkpoints, and two simultaneous temporary checkpoints. Both rounds from scratch need about 815 MiB. Inputs are shared without extra copies. Each worker inherits the coordinator's execution lock and stops if the coordinator disconnects; a worker failure stops its sibling and keeps saved checkpoints. Reissue the same command to recover. An unverified pilot restarts from 4847, and completed evaluations are reused.
+
+Results are written to `runs/train-volume-v1-4gpu/comparison-760.json`. For the optional second round, use `python run.py compare --gpus 4 --rounds 2` with the same checkout and run ID. The 36-hour budget remains measured from the comparison's first start. The time gate uses the slower parallel arm, including its DEV evaluation.
 
 ## Earlier wording comparison
 

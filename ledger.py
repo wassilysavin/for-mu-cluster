@@ -159,7 +159,7 @@ def execution_lease(runs_root):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError("Another training or evaluation job holds the execution lock") from exc
-        yield
+        yield fd
     finally:
         os.close(fd)
 

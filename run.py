@@ -1,6 +1,7 @@
 """Train, evaluate, and inspect frozen GEM-pRF cluster experiments."""
 
 import argparse
+from contextlib import ExitStack
 from hashlib import sha256
 from importlib.metadata import version
 import json
@@ -9,11 +10,12 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 from shutil import disk_usage
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-from time import monotonic, time, time_ns
+from time import monotonic, sleep, time, time_ns
 from types import SimpleNamespace
 
 from ledger import SAFE_ID, code_record, execution_lease, file_record, open_run, publish_json, read_result, report
@@ -33,6 +35,7 @@ MIB = 1024 * 1024
 DISK_RESERVE_BYTES = 512 * MIB
 DEV_LOG_BUDGET_BYTES = 32 * MIB
 RUN_METADATA_BUDGET_BYTES = 8 * MIB
+WORKER_PARENT_FD = None
 
 
 def read_json(path):
@@ -272,6 +275,7 @@ def require_pilot(runs, pilot_run_id, identity):
     checkpoint = file_record(path / "checkpoint.safetensors")
     verified = False
     measurements = {}
+    parity_steps = set()
     with (path / "events.jsonl").open() as stream:
         for line in stream:
             if not line.endswith("\n"):
@@ -280,15 +284,27 @@ def require_pilot(runs, pilot_run_id, identity):
             if event["event"] == "update":
                 measurement = event["details"]
                 measurements[measurement["step"]] = measurement
+            if event["event"] == "parallel_parity_verified":
+                parity_steps.add(event["details"]["step"])
             if event["event"] == "pilot_reload_verified":
                 verified = (event["details"]["checkpoint"] == checkpoint
                             and event["details"]["step"] == identity["recipe"]["initial_step"] + pilot["updates"])
     if not verified:
         raise ValueError("Complete the pilot save and reload before training an experimental arm")
+    if identity.get("execution"):
+        expected = {identity["recipe"]["initial_step"] + i + 1 for i in range(pilot["updates"])}
+        if recorded.get("execution") != identity["execution"] or not expected <= parity_steps:
+            raise ValueError("The GPU pair must pass both sequential-versus-parallel pilot updates")
     return list(measurements.values())
 
 
 def check_deadline(deadline):
+    if WORKER_PARENT_FD is not None:
+        try:
+            if os.read(WORKER_PARENT_FD, 1) == b"":
+                raise RuntimeError("Comparison coordinator disconnected; stopping its worker")
+        except BlockingIOError:
+            pass
     if deadline is not None and time() >= deadline:
         raise RuntimeError("Comparison time budget exhausted. Saved checkpoints and completed evaluations remain available.")
 
@@ -317,9 +333,35 @@ def verify_frozen_inputs(identity, assets, names):
             raise ValueError(f"Experiment input changed: {record['path']}")
 
 
+def make_runtime(assets, checkpoint, devices=(), *, paired=False):
+    from model import Runtime
+
+    if paired:
+        from model import PairedRuntime
+        return PairedRuntime(assets["base"][0], checkpoint, devices=[f"cuda:{index}" for index in devices])
+    options = {"device": f"cuda:{devices[0]}"} if devices else {}
+    return Runtime(assets["base"][0], checkpoint, **options)
+
+
+def verify_parallel_update(parallel, sequential, loss, reference_loss):
+    import torch
+
+    if parallel.step != sequential.step:
+        raise ValueError("Parallel pilot step differs from sequential execution")
+    torch.testing.assert_close(torch.tensor(loss), torch.tensor(reference_loss), rtol=1e-5, atol=1e-7)
+    for field in ("parameters", "rows", "cols"):
+        actual, expected = getattr(parallel, field), getattr(sequential, field)
+        if actual.keys() != expected.keys():
+            raise ValueError(f"Parallel pilot {field} names differ")
+        for key in actual:
+            torch.testing.assert_close(actual[key], expected[key], rtol=1e-5,
+                                       atol=1e-8 if field == "parameters" else 0,
+                                       msg=lambda message: f"Parallel pilot {field}/{key}: {message}")
+
+
 def train(args, identity, experiment, assets, schedule, *, until=None, lease_held=False, deadline=None):
     import torch
-    from model import LAYERS, LEARNING_RATE, LOSS_SCALE, Runtime
+    from model import LAYERS, LEARNING_RATE, LOSS_SCALE
 
     recipe = identity["recipe"]
     if (schedule is None or recipe["learning_rate"] != LEARNING_RATE or recipe["loss_scale"] != LOSS_SCALE
@@ -335,13 +377,22 @@ def train(args, identity, experiment, assets, schedule, *, until=None, lease_hel
     check_deadline(deadline)
     if lease_held:
         verify_frozen_inputs(identity, assets, ("base", "initial_checkpoint", "train"))
-    with open_run(args.runs, args.run_id, identity, resume=args.resume, lease_held=lease_held) as run:
+    with open_run(args.runs, args.run_id, identity, resume=args.resume, lease_held=lease_held) as run, ExitStack() as resources:
         initial = assets["initial_checkpoint"][0]
         latest = run.path / "checkpoint.safetensors"
-        checkpoint = latest if args.resume and latest.exists() else initial
+        restart_pilot = experiment["kind"] == "pilot" and getattr(args, "restart_pilot", False)
+        checkpoint = latest if args.resume and latest.exists() and not restart_pilot else initial
+        if restart_pilot and latest.exists():
+            run.event("unverified_pilot_restarted", checkpoint=file_record(latest))
         lineage = {"identity_sha256": run.identity_sha256,
                    "initial_checkpoint_sha256": assets["initial_checkpoint"][1]["sha256"]}
-        runtime = Runtime(assets["base"][0], checkpoint)
+        devices = getattr(args, "devices", ())
+        runtime = make_runtime(assets, checkpoint, devices, paired=len(devices) == 2)
+        resources.callback(getattr(runtime, "close", lambda: None))
+        reference = None
+        if len(devices) == 2 and experiment["kind"] == "pilot":
+            reference = make_runtime(assets, checkpoint, devices)
+            resources.callback(reference.close)
         if runtime.tokenizer_sha256 != assets["tokenizer"][1]["sha256"]:
             raise ValueError("Checkpoint tokenizer differs from the experiment")
         if checkpoint == latest and runtime.lineage != lineage:
@@ -362,31 +413,46 @@ def train(args, identity, experiment, assets, schedule, *, until=None, lease_hel
             for update in range(done, limit):
                 check_deadline(deadline)
                 batch, case_ids = schedule.batch(stream, EXAMPLES_PER_UPDATE * update, EXAMPLES_PER_UPDATE)
-                torch.cuda.reset_peak_memory_stats()
+                if devices:
+                    runtime.synchronize()
+                    runtime.reset_peak_memory_stats()
+                else:
+                    torch.cuda.reset_peak_memory_stats()
                 began = monotonic()
                 try:
                     loss = runtime.train_step(batch)
                 except FloatingPointError as error:
                     raise FloatingPointError(f"{', '.join(case_ids)}: {error}") from error
+                if devices:
+                    runtime.synchronize()
                 elapsed = monotonic() - began
+                peaks = runtime.peak_memory_stats() if devices else {}
+                if reference is not None:
+                    reference_loss = reference.train_step(batch)
+                    verify_parallel_update(runtime, reference, loss, reference_loss)
+                    run.event("parallel_parity_verified", step=runtime.step, rtol=1e-5,
+                              parameter_atol=1e-8, optimizer_atol=0)
                 if runtime.step != initial_step + update + 1:
                     raise RuntimeError("Runtime cursor did not advance by one update")
                 at_milestone = update + 1 in milestones
                 checkpoint_saved = (update + 1) % save_every == 0 or update + 1 == limit or at_milestone
                 if checkpoint_saved:
                     if lease_held:
-                        require_run_space(run.path, checkpoint_budget(assets) + RUN_METADATA_BUDGET_BYTES)
+                        require_run_space(run.path, (2 if devices else 1) * (checkpoint_budget(assets) + RUN_METADATA_BUDGET_BYTES))
                     save_latest(runtime, latest, lineage)
                     if at_milestone:
                         snapshot(latest, runtime.step)
                 run.event("update", step=runtime.step, loss=loss, seconds=elapsed, case_ids=case_ids,
                           peak_allocated_bytes=torch.cuda.max_memory_allocated(),
-                          checkpoint_saved=checkpoint_saved)
-                print(f"{runtime.step}  loss={loss:.6f}  {elapsed:.2f}s", flush=True)
+                          checkpoint_saved=checkpoint_saved, **({"device_peak_bytes": peaks} if peaks else {}))
+                prefix = f"[{args.run_id}] " if devices else ""
+                print(f"{prefix}{runtime.step}  loss={loss:.6f}  {elapsed:.2f}s", flush=True)
         if experiment["kind"] == "pilot":
-            del runtime
+            resources.close()
+            del runtime, reference
             torch.cuda.empty_cache()
-            restored = Runtime(assets["base"][0], latest)
+            restored = make_runtime(assets, latest, devices)
+            resources.callback(getattr(restored, "close", lambda: None))
             if restored.step != initial_step + updates or restored.lineage != lineage:
                 raise ValueError("Pilot checkpoint reload differs from the saved run")
             run.event("pilot_reload_verified", step=restored.step, checkpoint=file_record(latest))
@@ -432,8 +498,6 @@ def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observation
 
 
 def test(args, identity, experiment, assets, *, at=None, lease_held=False, deadline=None):
-    from model import Runtime
-
     baseline = experiment["kind"] == "baseline"
     if experiment["kind"] == "pilot" or (at is not None and at not in experiment.get("milestones", ())):
         raise ValueError("Evaluation requires a reference or declared training checkpoint")
@@ -453,7 +517,7 @@ def test(args, identity, experiment, assets, *, at=None, lease_held=False, deadl
             raise ValueError("This checkpoint already has a completed evaluation")
         checkpoint = assets["initial_checkpoint"][0] if baseline else run.path / checkpoint_name
         checkpoint_record = file_record(checkpoint)
-        runtime = Runtime(assets["base"][0], checkpoint)
+        runtime = make_runtime(assets, checkpoint, getattr(args, "devices", ()))
         if runtime.tokenizer_sha256 != assets["tokenizer"][1]["sha256"]:
             raise ValueError("Checkpoint tokenizer differs from the experiment")
         if not baseline:
@@ -476,7 +540,10 @@ def test(args, identity, experiment, assets, *, at=None, lease_held=False, deadl
                          generated_cases=score["generated_cases"], observed_records=score["observed_records"],
                          observations=file_record(observations),
                          **({"seconds": monotonic() - began} if suite is not None else {}))
-        print(json.dumps(score["summary"], indent=2))
+        summary = score["summary"]
+        if identity.get("execution"):
+            summary = {"run_id": args.run_id, **summary}
+        print(json.dumps(summary, indent=2), flush=True)
 
 
 def check_evaluation(config, assets):
@@ -585,35 +652,56 @@ def saved_updates(path, initial_step):
     return step - initial_step
 
 
-def comparison_space(runs, pilot_id, baseline_id, arm_ids, steps, assets):
-    checkpoints = int(not (runs / pilot_id / "checkpoint.safetensors").is_file())
+def comparison_space(runs, pilot_id, baseline_id, arm_ids, steps, assets, *, parallel=False):
+    pilot_ids = [pilot_id] if isinstance(pilot_id, str) else pilot_id
+    checkpoints = sum(not (runs / name / "checkpoint.safetensors").is_file() for name in pilot_ids)
     evaluations = int(not (runs / baseline_id / "result.json").is_file())
     for arm in arm_ids:
         for step in steps:
             checkpoints += not (runs / arm / f"checkpoint-step-{step}.safetensors").is_file()
             evaluations += not (runs / arm / f"result-step-{step}.json").is_file()
-    return ((checkpoints + 1) * checkpoint_budget(assets)
+    return ((checkpoints + (2 if parallel else 1)) * checkpoint_budget(assets)
             + evaluations * DEV_LOG_BUDGET_BYTES + RUN_METADATA_BUDGET_BYTES)
 
 
-def admit_round(runs, run_ids, initial_step, milestone, pilot, baseline, deadline):
-    expected_updates = 0
-    evaluations = 0
+def admit_round(runs, run_ids, initial_step, milestone, pilot, baseline, deadline, *, parallel=False):
+    pending = []
     for name in run_ids:
         path = runs / name
         step = initial_step + milestone
         if (path / f"result-step-{step}.json").is_file():
             continue
-        evaluations += 1
+        updates = 0
         if not (path / f"checkpoint-step-{step}.safetensors").is_file():
-            expected_updates += max(0, milestone - saved_updates(path, initial_step))
-    if not evaluations:
+            updates = max(0, milestone - saved_updates(path, initial_step))
+        pending.append(updates)
+    if not pending:
         return
     step_seconds = max(item["seconds"] for item in pilot)
     evaluate_seconds = baseline["details"]["seconds"]
-    estimated = 1.15 * (expected_updates * step_seconds + evaluations * evaluate_seconds) + 120 * evaluations
+    durations = [1.15 * (updates * step_seconds + evaluate_seconds) + 120 for updates in pending]
+    estimated = max(durations) if parallel else sum(durations)
+    if parallel:
+        print(f"Parallel round budget estimate: {estimated / 3600:.1f} h remaining", flush=True)
     if time() + estimated >= deadline:
         raise RuntimeError(f"Remaining time cannot fit both arms and their DEV checks (estimate {estimated / 3600:.1f} h)")
+
+
+def publish_comparison(runs, directory, milestone, baseline, arms, plan):
+    narrow, wide = (observed_outcomes(runs, result) for result in arms)
+    if narrow.keys() != observed_outcomes(runs, baseline).keys():
+        raise ValueError("The comparison evaluated different development questions")
+    summary = {"updates_per_arm": milestone, "baseline": baseline,
+               "narrow": arms[0], "wide": arms[1], "paired": paired_outcomes(plan, narrow, wide),
+               "quality_status": "automatic_screening_pending_independent_review"}
+    path = directory / f"comparison-{milestone}.json"
+    if path.exists():
+        if read_json(path) != summary:
+            raise ValueError(f"Previously saved comparison changed at {milestone} updates")
+    else:
+        require_run_space(directory, RUN_METADATA_BUDGET_BYTES)
+        publish_json(path, summary)
+    print(f"Paired DEV comparison saved to {path}", flush=True)
 
 
 def volume_compare(args):
@@ -664,7 +752,6 @@ def volume_compare(args):
             raise ValueError("Pilot is missing update timing or memory evidence")
         baseline = volume_evaluation(job(baseline_id), identities[baseline_id], prepared[baseline_id][0],
                                      assets, deadline=deadline)
-        baseline_ids = observed_outcomes(args.runs, baseline).keys()
         with assets["dev"][0].open() as stream:
             plan = [json.loads(line) for line in stream]
         for milestone in rounds:
@@ -682,19 +769,197 @@ def volume_compare(args):
                           lease_held=True, deadline=deadline)
                 arms.append(volume_evaluation(run_job, identities[name], experiment, assets, at=milestone,
                                               deadline=deadline))
-            narrow, wide = (observed_outcomes(args.runs, result) for result in arms)
-            if narrow.keys() != baseline_ids:
-                raise ValueError("The comparison evaluated different development questions")
-            summary = {"updates_per_arm": milestone, "baseline": baseline,
-                       "narrow": arms[0], "wide": arms[1], "paired": paired_outcomes(plan, narrow, wide),
-                       "quality_status": "automatic_screening_pending_independent_review"}
-            path = directory / f"comparison-{milestone}.json"
-            if path.exists():
-                if read_json(path) != summary:
-                    raise ValueError(f"Previously saved comparison changed at {milestone} updates")
-            else:
-                publish_json(path, summary)
-            print(f"Paired DEV comparison saved to {path}", flush=True)
+            publish_comparison(args.runs, directory, milestone, baseline, arms, plan)
+
+
+
+def parallel_context():
+    import torch
+
+    config, assets = load_config("volume")
+    prepared, milestones = volume_experiments(config, assets)
+    runtime = runtime_identity()
+    if torch.cuda.device_count() < 4:
+        raise RuntimeError("--gpus 4 needs four visible V100 GPUs in the cluster allocation")
+    visible = []
+    for index in range(4):
+        info = torch.cuda.get_device_properties(index)
+        if (info.major, info.minor) != (7, 0):
+            raise RuntimeError(f"Visible GPU {index} is not Volta")
+        visible.append({"index": index, "name": info.name, "memory_bytes": info.total_memory,
+                        "uuid": str(getattr(info, "uuid", "unavailable"))})
+    uuids = [entry["uuid"] for entry in visible if entry["uuid"] != "unavailable"]
+    if len(uuids) != len(set(uuids)):
+        raise RuntimeError("The four visible GPU indices must identify distinct physical devices")
+    runtime.update(devices=visible, cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
+    arms = config["volume"]["arms"]
+    pairs = {arm: (2 * i, 2 * i + 1) for i, arm in enumerate(arms)}
+    pilot = config["volume"]["pilot"]["id"]
+    baseline = config["volume"]["baseline"]
+    entries = {baseline: (baseline, (0,))}
+    for arm, devices in pairs.items():
+        entries.update({arm: (arm, devices), f"{pilot}-{arm}": (pilot, devices)})
+    identities = {}
+    for name, (experiment_id, devices) in entries.items():
+        experiment, _, record = prepared[experiment_id]
+        identity = run_identity(experiment_id, config, experiment, assets, record, runtime=runtime)
+        identity["execution"] = {"mode": "paired-microbatches-v1", "devices": list(devices),
+                                 "gradient_reduction": "sum", "examples_per_update": 2}
+        identities[name] = identity
+    return config, assets, prepared, milestones, identities, pairs
+
+
+def parallel_job(args, name, devices):
+    pilot = f"{args.run_id}-pilot-{name}" if name in ("narrow", "wide") else None
+    run_id = f"{args.run_id}-{name}"
+    return SimpleNamespace(runs=args.runs, run_id=run_id, devices=devices, pilot_run_id=pilot,
+                           resume=(args.runs / run_id / "run.json").is_file())
+
+
+def verify_worker_lease(runs, lease_fd):
+    held = os.fstat(lease_fd)
+    named = os.stat(runs / ".execution.lock", follow_symlinks=False)
+    if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+        raise ValueError("Worker did not inherit this comparison's execution lease")
+    try:
+        with execution_lease(runs):
+            pass
+    except RuntimeError:
+        return
+    raise RuntimeError("Worker's inherited execution lease is not locked")
+
+
+def parallel_worker(args):
+    global WORKER_PARENT_FD
+    import torch
+
+    verify_worker_lease(args.runs, args.lease_fd)
+    WORKER_PARENT_FD = args.parent_fd
+    os.set_blocking(WORKER_PARENT_FD, False)
+    config, assets, prepared, milestones, identities, pairs = parallel_context()
+    directory = args.runs / args.run_id
+    if not (directory / "comparison.json").is_file():
+        raise ValueError("Worker requires an existing comparison manifest")
+    deadline = comparison_deadline(directory, None, identities)
+    check_deadline(deadline)
+    devices = pairs[args.worker]
+    torch.cuda.set_device(devices[0])
+    if args.worker_stage == "pilot":
+        name = f"pilot-{args.worker}"
+        pilot_id = config["volume"]["pilot"]["id"]
+        experiment, schedule, _ = prepared[pilot_id]
+        job = parallel_job(args, name, devices)
+        try:
+            require_pilot(args.runs, job.run_id, identities[args.worker])
+        except (FileNotFoundError, ValueError):
+            job.restart_pilot = True
+            train(job, identities[name], experiment, assets, schedule, lease_held=True, deadline=deadline)
+        require_pilot(args.runs, job.run_id, identities[args.worker])
+    else:
+        if args.until not in milestones:
+            raise ValueError("Worker requires a declared training milestone")
+        experiment, schedule, _ = prepared[args.worker]
+        job = parallel_job(args, args.worker, devices)
+        step = config["recipe"]["initial_step"] + args.until
+        checkpoint = args.runs / job.run_id / f"checkpoint-step-{step}.safetensors"
+        if not checkpoint.exists():
+            train(job, identities[args.worker], experiment, assets, schedule,
+                  until=args.until, lease_held=True, deadline=deadline)
+        volume_evaluation(job, identities[args.worker], experiment, assets, at=args.until, deadline=deadline)
+
+
+def launch_workers(args, arms, milestone, lease_fd, deadline, *, stage="arm"):
+    read_fd, write_fd = os.pipe()
+    processes = []
+    try:
+        for name in arms:
+            command = [sys.executable, "-u", str(ROOT / "run.py"), "--runs", str(args.runs),
+                       "compare", "--gpus", "4", "--run-id", args.run_id,
+                       "--worker", name, "--worker-stage", stage, "--until", str(milestone),
+                       "--lease-fd", str(lease_fd), "--parent-fd", str(read_fd)]
+            processes.append((name, subprocess.Popen(command, pass_fds=(lease_fd, read_fd),
+                                                      start_new_session=True)))
+        while True:
+            check_deadline(deadline)
+            statuses = [(name, process.poll()) for name, process in processes]
+            failed = [(name, status) for name, status in statuses if status not in (None, 0)]
+            if failed:
+                raise RuntimeError(f"Parallel {stage} worker failed: {failed}; saved checkpoints remain available")
+            if all(status == 0 for _, status in statuses):
+                return
+            sleep(0.2)
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+        for _, process in processes:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        for _, process in processes:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+
+
+def volume_compare_parallel(args):
+    import torch
+
+    if not SAFE_ID.fullmatch(args.run_id) or len(args.run_id) > 75:
+        raise ValueError("Invalid parallel comparison ID")
+    with execution_lease(args.runs) as lease_fd:
+        config, assets, prepared, milestones, identities, pairs = parallel_context()
+        check_evaluation(config, assets)
+        directory = args.runs / args.run_id
+        rounds = milestones[:args.rounds]
+        initial = config["recipe"]["initial_step"]
+        pilots = [f"{args.run_id}-pilot-{arm}" for arm in pairs]
+        arm_ids = [f"{args.run_id}-{arm}" for arm in pairs]
+        baseline_name = config["volume"]["baseline"]
+        baseline_job = parallel_job(args, baseline_name, (0,))
+        if not (directory / f"comparison-{rounds[-1]}.json").is_file():
+            require_run_space(args.runs, comparison_space(args.runs, pilots, baseline_job.run_id, arm_ids,
+                              [initial + milestone for milestone in rounds], assets, parallel=True))
+        deadline = comparison_deadline(directory, args.hours, identities)
+        pending_pilots = []
+        for arm, pilot in zip(pairs, pilots):
+            try:
+                require_pilot(args.runs, pilot, identities[arm])
+            except (FileNotFoundError, ValueError):
+                pending_pilots.append(arm)
+        if pending_pilots:
+            print("Pilot: GPUs 0+1 and 2+3; each pair must match sequential updates", flush=True)
+            launch_workers(args, pending_pilots, 0, lease_fd, deadline, stage="pilot")
+        measurements = [item for arm, pilot in zip(pairs, pilots)
+                        for item in require_pilot(args.runs, pilot, identities[arm])]
+        if (len(measurements) != 4 or any(not isfinite(item["seconds"]) or item["seconds"] <= 0
+                                       or item["peak_allocated_bytes"] <= 0 for item in measurements)):
+            raise ValueError("Both GPU pairs need complete pilot timing and memory evidence")
+        print("Baseline: evaluating 155 DEV cases on GPU 0", flush=True)
+        baseline = volume_evaluation(baseline_job, identities[baseline_name], prepared[baseline_name][0],
+                                     assets, deadline=deadline)
+        torch.cuda.empty_cache()
+        with assets["dev"][0].open() as stream:
+            plan = [json.loads(line) for line in stream]
+        for milestone in rounds:
+            if not (directory / f"comparison-{milestone}.json").is_file():
+                require_run_space(args.runs, comparison_space(args.runs, pilots, baseline_job.run_id,
+                                  arm_ids, [initial + milestone], assets, parallel=True))
+            admit_round(args.runs, arm_ids, initial, milestone, measurements, baseline, deadline, parallel=True)
+            pending = [arm for arm in pairs if not (args.runs / f"{args.run_id}-{arm}"
+                       / f"result-step-{initial + milestone}.json").is_file()]
+            if pending:
+                print(f"Training arms to +{milestone}: narrow on 0+1, wide on 2+3", flush=True)
+                launch_workers(args, pending, milestone, lease_fd, deadline)
+            results = [volume_evaluation(parallel_job(args, arm, devices), identities[arm], prepared[arm][0],
+                                        assets, at=milestone, deadline=deadline) for arm, devices in pairs.items()]
+            publish_comparison(args.runs, directory, milestone, baseline, results, plan)
 
 
 def main():
@@ -705,9 +970,15 @@ def main():
     commands.add_parser("check")
     commands.add_parser("report")
     comparison = commands.add_parser("compare")
-    comparison.add_argument("--run-id", default="train-volume-v1")
+    comparison.add_argument("--run-id")
+    comparison.add_argument("--gpus", type=int, choices=(1, 4), default=1)
     comparison.add_argument("--rounds", type=int, choices=(1, 2), default=1)
     comparison.add_argument("--hours", type=float, help="Fixed time budget for the comparison, up to 36 hours")
+    comparison.add_argument("--worker", choices=("narrow", "wide"), help=argparse.SUPPRESS)
+    comparison.add_argument("--worker-stage", choices=("pilot", "arm"), default="arm", help=argparse.SUPPRESS)
+    comparison.add_argument("--until", type=int, help=argparse.SUPPRESS)
+    comparison.add_argument("--lease-fd", type=int, help=argparse.SUPPRESS)
+    comparison.add_argument("--parent-fd", type=int, help=argparse.SUPPRESS)
     training = commands.add_parser("train")
     evaluation = commands.add_parser("test")
     for command in (training, evaluation):
@@ -722,7 +993,15 @@ def main():
     elif args.command == "check":
         check(args.suite)
     elif args.command == "compare":
-        volume_compare(args)
+        args.run_id = args.run_id or ("train-volume-v1-4gpu" if args.gpus == 4 else "train-volume-v1")
+        if args.worker:
+            if args.gpus != 4 or args.lease_fd is None or args.parent_fd is None:
+                parser.error("Workers must be launched by the four-GPU coordinator")
+            parallel_worker(args)
+        elif args.gpus == 4:
+            volume_compare_parallel(args)
+        else:
+            volume_compare(args)
     else:
         if args.suite == "volume":
             parser.error("Use compare for the volume suite")

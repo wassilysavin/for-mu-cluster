@@ -1,14 +1,16 @@
-"""FunctionGemma 270M LoRA runtime for a single Volta GPU."""
+"""FunctionGemma 270M LoRA runtime for Volta GPUs."""
 
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, wait
 from hashlib import file_digest, sha256
 import json
 import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from threading import RLock
 
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -44,6 +46,7 @@ NORMS = {
 }
 EMBEDDING = "model.embed_tokens"
 ROLES = {"parameter": "lora", "row": "adafactor.row", "col": "adafactor.col"}
+_SDPA_LOCK = RLock()
 
 
 def layer_path(layer: int) -> str:
@@ -200,6 +203,26 @@ class Runtime:
         self.tokenizer_sha256 = self._metadata["tokenizer_sha256"]
         self.base = load_base(Path(base_path), json.loads(self._metadata["base_model_manifest"]), self.device)
 
+    @property
+    def devices(self) -> tuple[torch.device, ...]:
+        return (self.device,)
+
+    def synchronize(self) -> None:
+        for device in self.devices:
+            torch.cuda.synchronize(device)
+
+    def reset_peak_memory_stats(self) -> None:
+        self.synchronize()
+        for device in self.devices:
+            torch.cuda.reset_peak_memory_stats(device)
+
+    def peak_memory_stats(self) -> dict[str, int]:
+        self.synchronize()
+        return {str(device): torch.cuda.max_memory_allocated(device) for device in self.devices}
+
+    def close(self) -> None:
+        pass
+
     def _linear(self, value, path):
         frozen = F.linear(value, self.base[path])
         adjusted = F.linear(F.linear(value, self.parameters[f"{path}.lora_A"]),
@@ -234,7 +257,7 @@ class Runtime:
         if not local:
             if key_count != offset + query_count or (offset and query_count != 1):
                 raise ValueError("Unexpected global attention extent")
-            with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+            with _SDPA_LOCK, sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
                 return F.scaled_dot_product_attention(query.contiguous(), key, value,
                                                       is_causal=offset == 0, scale=1 / 16)
         origin = offset + query_count - key_count
@@ -246,7 +269,7 @@ class Runtime:
             qp = torch.arange(offset + first, offset + last, device=self.device)[:, None]
             kp = torch.arange(origin + begin, origin + end, device=self.device)[None, :]
             mask = (kp <= qp) & (kp > qp - WINDOW)
-            with sdpa_kernel(SDPBackend.MATH):
+            with _SDPA_LOCK, sdpa_kernel(SDPBackend.MATH):
                 block = F.scaled_dot_product_attention(query[:, :, first:last], key[:, :, begin:end],
                                                        value[:, :, begin:end], attn_mask=mask, scale=1 / 16)
             outputs.append(block)
@@ -393,3 +416,99 @@ class Runtime:
             finally:
                 os.close(fd)
         self.lineage = dict(lineage)
+
+
+class PairedRuntime(Runtime):
+    """Run the two microbatches concurrently, with one primary optimizer."""
+
+    def __init__(self, base_path: Path, checkpoint_path: Path, *, devices: Sequence[str]):
+        selected = tuple(torch.device(device) for device in devices)
+        if (len(selected) != 2 or len(set(selected)) != 2
+                or any(device.type != "cuda" or device.index is None for device in selected)):
+            raise ValueError("Paired training requires two distinct explicit CUDA devices")
+        self._devices = selected
+        self._closed = False
+        self._failed = False
+        super().__init__(base_path, checkpoint_path, device=str(selected[0]))
+        self._peer = Runtime(base_path, checkpoint_path, device=str(selected[1]))
+        if self._peer._metadata != self._metadata or self._peer.step != self.step:
+            raise ValueError("Paired replicas loaded different checkpoints")
+        self.synchronize()
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gemprf-microbatch")
+
+    @property
+    def devices(self) -> tuple[torch.device, ...]:
+        return self._devices
+
+    @staticmethod
+    def _microbatch(runtime, example, count, index):
+        with torch.cuda.device(runtime.device), torch.cuda.stream(torch.cuda.default_stream(runtime.device)):
+            prompt, completion = example
+            try:
+                loss = runtime._loss_sum(prompt, completion) / count
+                if not torch.isfinite(loss).item():
+                    raise FloatingPointError("Nonfinite target loss")
+                (loss * LOSS_SCALE).backward()
+                torch.cuda.synchronize(runtime.device)
+                return loss.detach()
+            except FloatingPointError as error:
+                raise FloatingPointError(f"Example {index} of 2: {error}") from error
+
+    def train_step(self, examples: Sequence[tuple[list[int], list[int]]]) -> float:
+        if self._closed or self._failed:
+            raise RuntimeError("The paired runtime is closed or failed")
+        if len(examples) != 2:
+            raise ValueError("One update requires two microbatches")
+        for prompt, completion in examples:
+            self._validate_tokens(prompt, CONTEXT)
+            self._validate_tokens(completion, CONTEXT - len(prompt))
+        if self._peer.step != self.step:
+            raise RuntimeError("The paired replicas have different update cursors")
+        count = sum(len(completion) for _, completion in examples)
+        futures = []
+        try:
+            for index, (runtime, example) in enumerate(zip((self, self._peer), examples), start=1):
+                futures.append(self._executor.submit(self._microbatch, runtime, example, count, index))
+            wait(futures)
+            losses = [future.result() for future in futures]
+            with torch.cuda.device(self.device), torch.cuda.stream(torch.cuda.default_stream(self.device)):
+                mean_loss = torch.stack([loss.to(self.device) for loss in losses]).sum().item()
+                for name, parameter in self.parameters.items():
+                    other = self._peer.parameters[name].grad
+                    if parameter.grad is None or other is None:
+                        raise RuntimeError(f"Missing paired adapter gradient: {name}")
+                    parameter.grad.add_(other.to(self.device))
+                self._update()
+                torch.cuda.synchronize(self.device)
+            with torch.no_grad(), torch.cuda.device(self._peer.device), torch.cuda.stream(
+                    torch.cuda.default_stream(self._peer.device)):
+                for name, parameter in self.parameters.items():
+                    self._peer.parameters[name].copy_(parameter)
+            self.synchronize()
+            self._peer.step = self.step
+            return mean_loss
+        except BaseException:
+            self._failed = True
+            raise
+        finally:
+            try:
+                wait(futures)
+                self.synchronize()
+            except BaseException:
+                self._failed = True
+                raise
+            finally:
+                for runtime in (self, self._peer):
+                    for parameter in runtime.parameters.values():
+                        parameter.grad = None
+
+    def save_checkpoint(self, path: Path, *, lineage: Mapping[str, str]) -> None:
+        if self._closed or self._failed:
+            raise RuntimeError("Cannot save a closed or failed paired runtime")
+        super().save_checkpoint(path, lineage=lineage)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._peer = None
