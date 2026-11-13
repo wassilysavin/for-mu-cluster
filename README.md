@@ -31,7 +31,7 @@ The repository attributes use Git LFS for weights and TRAIN. Use and distributio
 
 ## Compare TRAIN volume
 
-Use the `train-volume-v1` branch and keep the checkout fixed until both arms finish. Run these commands from the repository in your existing Python environment. Use the same `runs/` directory for all jobs sharing the GPU and leave at least 3 GB free there.
+Use the `train-volume-v1` branch and keep the checkout fixed until both arms finish. Run these commands from the repository in your existing Python environment. Use the same `runs/` directory for all jobs sharing the GPU. From an empty run directory, the free-space check needs about 684 MiB for the first round or 782 MiB for both rounds, including a 512 MiB reserve. The runner checks space again when saving checkpoints and writing evaluation observations.
 
 ```sh
 git lfs pull

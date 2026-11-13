@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { open, readFile } from 'node:fs/promises';
+import { open, readFile, statfs } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { evaluateDevelopment, validateDevelopmentPlan } from './evaluation/development-evaluator.mjs';
@@ -70,7 +71,7 @@ async function send(message) {
   });
 }
 
-async function evaluate(suite, observationsPath) {
+async function evaluate(suite, observationsPath, diskReserve) {
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const replies = input[Symbol.asyncIterator]();
   const observations = await open(observationsPath, 'wx');
@@ -103,7 +104,14 @@ async function evaluate(suite, observationsPath) {
         return raw_text;
       },
       onRecord: async record => {
-        await observations.appendFile(`${JSON.stringify(record)}\n`);
+        const line = Buffer.from(`${JSON.stringify(record)}\n`);
+        if (diskReserve > 0n) {
+          const { bavail, bsize } = await statfs(dirname(observationsPath), { bigint: true });
+          if (bavail * bsize < diskReserve + BigInt(line.length)) {
+            throw new Error('Run filesystem lost its free-space reserve during DEV evaluation');
+          }
+        }
+        await observations.appendFile(line);
         await observations.datasync();
       },
       stopOnProviderFailure: true,
@@ -116,8 +124,8 @@ async function evaluate(suite, observationsPath) {
   }
 }
 
-const [registryPath, devPath, output, specification] = process.argv.slice(2);
+const [registryPath, devPath, output, specification, diskReserve = '0'] = process.argv.slice(2);
 if (!registryPath || !devPath || !output) throw new Error('Expected registry, development data, and observations path or --check');
 const suite = await loadSuite(registryPath, devPath, specification ? JSON.parse(specification) : legacy);
 if (output === '--check') await send({ kind: 'check', cases: suite.rows.length, history_reviews: suite.reviews.size });
-else await evaluate(suite, output);
+else await evaluate(suite, output, BigInt(diskReserve));

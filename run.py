@@ -29,6 +29,10 @@ CONTEXT = 32768
 TARGET_LIMIT = 512
 STOP_TOKEN = 50
 EXAMPLES_PER_UPDATE = 2
+MIB = 1024 * 1024
+DISK_RESERVE_BYTES = 512 * MIB
+DEV_LOG_BUDGET_BYTES = 32 * MIB
+RUN_METADATA_BUDGET_BYTES = 8 * MIB
 
 
 def read_json(path):
@@ -289,6 +293,20 @@ def check_deadline(deadline):
         raise RuntimeError("Comparison time budget exhausted. Saved checkpoints and completed evaluations remain available.")
 
 
+def require_run_space(path, additional_bytes):
+    free = disk_usage(path).free
+    required = DISK_RESERVE_BYTES + additional_bytes
+    if free < required:
+        raise RuntimeError(
+            f"Run filesystem has {free / MIB:.0f} MiB free; "
+            f"this stage needs {(required + MIB - 1) // MIB} MiB including a 512 MiB reserve."
+        )
+
+
+def checkpoint_budget(assets):
+    return assets["initial_checkpoint"][1]["bytes"] + MIB
+
+
 def verify_frozen_inputs(identity, assets, names):
     for entry in identity["code"]["files"]:
         if file_record(ROOT / entry["path"], relative_to=ROOT) != entry:
@@ -356,6 +374,8 @@ def train(args, identity, experiment, assets, schedule, *, until=None, lease_hel
                 at_milestone = update + 1 in milestones
                 checkpoint_saved = (update + 1) % save_every == 0 or update + 1 == limit or at_milestone
                 if checkpoint_saved:
+                    if lease_held:
+                        require_run_space(run.path, checkpoint_budget(assets) + RUN_METADATA_BUDGET_BYTES)
                     save_latest(runtime, latest, lineage)
                     if at_milestone:
                         snapshot(latest, runtime.step)
@@ -383,7 +403,7 @@ def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observation
     command = ["node", str(ROOT / "evaluate.mjs"), str(registry_path), str(dev_path), str(observations)]
     expected = 700 if suite is None else suite["cases"]
     if suite is not None:
-        command.append(compact(suite))
+        command.extend((compact(suite), str(DISK_RESERVE_BYTES + RUN_METADATA_BUDGET_BYTES)))
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           text=True, encoding="utf-8") as process:
         score = None
@@ -425,6 +445,7 @@ def test(args, identity, experiment, assets, *, at=None, lease_held=False, deadl
     resume = not baseline or (args.runs / args.run_id / "run.json").exists()
     check_deadline(deadline)
     if suite is not None:
+        require_run_space(args.runs, DEV_LOG_BUDGET_BYTES + RUN_METADATA_BUDGET_BYTES)
         verify_frozen_inputs(identity, assets, ("base", "initial_checkpoint", "tokenizer", "registry", "dev"))
     stage = f"evaluate-{expected_step}" if at is not None else "evaluate"
     with open_run(args.runs, args.run_id, identity, resume=resume, stage=stage, lease_held=lease_held) as run:
@@ -448,6 +469,7 @@ def test(args, identity, experiment, assets, *, at=None, lease_held=False, deadl
                                observations, suite=suite, deadline=deadline)
         if suite is not None:
             verify_frozen_inputs(identity, assets, ("tokenizer", "registry", "dev"))
+            require_run_space(run.path, RUN_METADATA_BUDGET_BYTES)
         if file_record(checkpoint) != checkpoint_record:
             raise ValueError("Checkpoint changed during evaluation")
         run.write_result(score["summary"], checkpoint_record, name=result_name, step=runtime.step,
@@ -563,6 +585,17 @@ def saved_updates(path, initial_step):
     return step - initial_step
 
 
+def comparison_space(runs, pilot_id, baseline_id, arm_ids, steps, assets):
+    checkpoints = int(not (runs / pilot_id / "checkpoint.safetensors").is_file())
+    evaluations = int(not (runs / baseline_id / "result.json").is_file())
+    for arm in arm_ids:
+        for step in steps:
+            checkpoints += not (runs / arm / f"checkpoint-step-{step}.safetensors").is_file()
+            evaluations += not (runs / arm / f"result-step-{step}.json").is_file()
+    return ((checkpoints + 1) * checkpoint_budget(assets)
+            + evaluations * DEV_LOG_BUDGET_BYTES + RUN_METADATA_BUDGET_BYTES)
+
+
 def admit_round(runs, run_ids, initial_step, milestone, pilot, baseline, deadline):
     expected_updates = 0
     evaluations = 0
@@ -576,8 +609,6 @@ def admit_round(runs, run_ids, initial_step, milestone, pilot, baseline, deadlin
             expected_updates += max(0, milestone - saved_updates(path, initial_step))
     if not evaluations:
         return
-    if disk_usage(runs).free < 3_000_000_000:
-        raise RuntimeError("Free at least 3 GB in the run filesystem before starting this comparison round")
     step_seconds = max(item["seconds"] for item in pilot)
     evaluate_seconds = baseline["details"]["seconds"]
     estimated = 1.15 * (expected_updates * step_seconds + evaluations * evaluate_seconds) + 120 * evaluations
@@ -601,9 +632,18 @@ def volume_compare(args):
                   for name, (experiment, _, record) in prepared.items()}
     with execution_lease(args.runs):
         directory = args.runs / args.run_id
-        if (not (directory / f"comparison-{milestones[args.rounds - 1]}.json").is_file()
-                and disk_usage(args.runs).free < 3_000_000_000):
-            raise RuntimeError("Free at least 3 GB in the run filesystem before starting the pilot and evaluations")
+        rounds = milestones[:args.rounds]
+        initial_step = config["recipe"]["initial_step"]
+        run_ids = [f"{args.run_id}-{name}" for name in arm_ids]
+
+        def check_space(pending_rounds):
+            require_run_space(args.runs, comparison_space(
+                args.runs, pilot_run, f"{args.run_id}-{baseline_id}", run_ids,
+                [initial_step + milestone for milestone in pending_rounds], assets,
+            ))
+
+        if not (directory / f"comparison-{rounds[-1]}.json").is_file():
+            check_space(rounds)
         deadline = comparison_deadline(directory, args.hours, identities)
 
         def job(name):
@@ -627,14 +667,15 @@ def volume_compare(args):
         baseline_ids = observed_outcomes(args.runs, baseline).keys()
         with assets["dev"][0].open() as stream:
             plan = [json.loads(line) for line in stream]
-        for milestone in milestones[:args.rounds]:
-            admit_round(args.runs, [job(name).run_id for name in arm_ids], config["recipe"]["initial_step"],
-                        milestone, measurements, baseline, deadline)
+        for milestone in rounds:
+            if not (directory / f"comparison-{milestone}.json").is_file():
+                check_space([milestone])
+            admit_round(args.runs, run_ids, initial_step, milestone, measurements, baseline, deadline)
             arms = []
             for name in arm_ids:
                 experiment, schedule, _ = prepared[name]
                 run_job = job(name)
-                step = config["recipe"]["initial_step"] + milestone
+                step = initial_step + milestone
                 checkpoint = args.runs / run_job.run_id / f"checkpoint-step-{step}.safetensors"
                 if not checkpoint.exists():
                     train(run_job, identities[name], experiment, assets, schedule, until=milestone,
