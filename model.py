@@ -223,6 +223,49 @@ class Runtime:
     def close(self) -> None:
         pass
 
+    @torch.no_grad()
+    def snapshot_training_state(self) -> dict:
+        if len(self.devices) != 1:
+            raise ValueError("Training snapshots require a single-device reference runtime")
+        self.synchronize()
+        state = {field: {name: value.detach().clone() for name, value in getattr(self, field).items()}
+                 for field in ("parameters", "rows", "cols")}
+        gradients = getattr(self, "last_gradients", None)
+        state.update(step=self.step, last_gradients=(
+            {name: value.detach().clone() for name, value in gradients.items()} if gradients is not None else None))
+        return state
+
+    @torch.no_grad()
+    def restore_training_state(self, state: Mapping) -> None:
+        if len(self.devices) != 1:
+            raise ValueError("Training restoration requires a single-device reference runtime")
+        if type(state.get("step")) is not int or state["step"] < self.initial_step:
+            raise ValueError("Invalid reference training cursor")
+        valid = []
+        for field in ("parameters", "rows", "cols"):
+            current, restored = getattr(self, field), state.get(field)
+            if not isinstance(restored, Mapping) or current.keys() != restored.keys():
+                raise ValueError(f"Reference training {field} names differ")
+            for name, value in restored.items():
+                previous = current[name]
+                if (not isinstance(value, torch.Tensor) or value.shape != previous.shape
+                        or value.dtype != previous.dtype or value.device != previous.device):
+                    raise ValueError(f"Invalid reference training tensor: {field}/{name}")
+                valid.append(torch.isfinite(value).all())
+                if field != "parameters":
+                    valid.append((value > 0).all())
+        if not torch.stack(valid).all().item():
+            raise ValueError("Invalid reference training state")
+        self.synchronize()
+        for name, parameter in self.parameters.items():
+            parameter.copy_(state["parameters"][name])
+            parameter.grad = None
+        self.rows = {name: value.detach().clone() for name, value in state["rows"].items()}
+        self.cols = {name: value.detach().clone() for name, value in state["cols"].items()}
+        self.step = state["step"]
+        self.last_gradients = None
+        self.synchronize()
+
     def _linear(self, value, path):
         frozen = F.linear(value, self.base[path])
         adjusted = F.linear(F.linear(value, self.parameters[f"{path}.lora_A"]),
@@ -350,10 +393,15 @@ class Runtime:
     def _update(self):
         next_step = self.step + 1
         updated = {}
+        capture = getattr(self, "capture_gradients", False)
+        self.last_gradients = {} if capture else None
         for name, parameter in self.parameters.items():
             if parameter.grad is None:
                 raise RuntimeError(f"Missing adapter gradient: {name}")
-            updated[name] = adafactor_update(parameter, parameter.grad / LOSS_SCALE,
+            gradient = parameter.grad / LOSS_SCALE
+            if capture:
+                self.last_gradients[name] = gradient.detach().clone()
+            updated[name] = adafactor_update(parameter, gradient,
                                             self.rows[name], self.cols[name], next_step)
         valid = [torch.isfinite(parameter).all() & (row > 0).all() & torch.isfinite(row).all()
                  & (col > 0).all() & torch.isfinite(col).all() for parameter, row, col in updated.values()]

@@ -275,7 +275,7 @@ def require_pilot(runs, pilot_run_id, identity):
     checkpoint = file_record(path / "checkpoint.safetensors")
     verified = False
     measurements = {}
-    parity_steps = set()
+    parity_steps, repeat_steps = set(), set()
     with (path / "events.jsonl").open() as stream:
         for line in stream:
             if not line.endswith("\n"):
@@ -284,8 +284,10 @@ def require_pilot(runs, pilot_run_id, identity):
             if event["event"] == "update":
                 measurement = event["details"]
                 measurements[measurement["step"]] = measurement
-            if event["event"] == "parallel_parity_verified":
+            if event["event"] == "parallel_parity_verified" and event["details"].get("gradients_checked") is True:
                 parity_steps.add(event["details"]["step"])
+            if event["event"] == "sequential_repeat_verified":
+                repeat_steps.add(event["details"]["step"])
             if event["event"] == "pilot_reload_verified":
                 verified = (event["details"]["checkpoint"] == checkpoint
                             and event["details"]["step"] == identity["recipe"]["initial_step"] + pilot["updates"])
@@ -293,7 +295,7 @@ def require_pilot(runs, pilot_run_id, identity):
         raise ValueError("Complete the pilot save and reload before training an experimental arm")
     if identity.get("execution"):
         expected = {identity["recipe"]["initial_step"] + i + 1 for i in range(pilot["updates"])}
-        if recorded.get("execution") != identity["execution"] or not expected <= parity_steps:
+        if recorded.get("execution") != identity["execution"] or not expected <= parity_steps & repeat_steps:
             raise ValueError("The GPU pair must pass both sequential-versus-parallel pilot updates")
     return list(measurements.values())
 
@@ -346,17 +348,56 @@ def make_runtime(assets, checkpoint, devices=(), *, paired=False):
 def verify_parallel_update(parallel, sequential, loss, reference_loss):
     import torch
 
-    if parallel.step != sequential.step:
-        raise ValueError("Parallel pilot step differs from sequential execution")
-    torch.testing.assert_close(torch.tensor(loss), torch.tensor(reference_loss), rtol=1e-5, atol=1e-7)
-    for field in ("parameters", "rows", "cols"):
-        actual, expected = getattr(parallel, field), getattr(sequential, field)
-        if actual.keys() != expected.keys():
-            raise ValueError(f"Parallel pilot {field} names differ")
+    difference = abs(loss - reference_loss)
+    limit = 1e-7 + 1e-5 * abs(reference_loss)
+    finite_loss = isfinite(loss) and isfinite(reference_loss)
+    scalar = {"actual": loss if isfinite(loss) else None,
+              "expected": reference_loss if isfinite(reference_loss) else None,
+              "abs_error": difference if isfinite(difference) else None,
+              "relative_error": difference / abs(reference_loss) if finite_loss and reference_loss else None,
+              "limit": limit if isfinite(limit) else None, "passed": finite_loss and difference <= limit}
+    result = {"step": parallel.step, "step_matches": parallel.step == sequential.step,
+              "loss": scalar, "fields": {}}
+    parameters = getattr(sequential, "parameters", None)
+    names = set(parameters) if isinstance(parameters, dict) else set()
+    for field in ("parameters", "rows", "cols", "last_gradients"):
+        actual, expected = getattr(parallel, field, None), getattr(sequential, field, None)
+        atol = 1e-8 if field in ("parameters", "last_gradients") else 0
+        entry = {"rtol": 1e-5, "atol": atol, "passed": True, "tensor_count": 0,
+                 "failed_tensors": [], "max_abs_error": 0.0, "max_relative_l2": 0.0}
+        result["fields"][field] = entry
+        if (not names or not isinstance(actual, dict) or not isinstance(expected, dict)
+                or set(actual) != names or set(expected) != names):
+            entry.update(passed=False, error="Missing or mismatched tensor names")
+            continue
         for key in actual:
-            torch.testing.assert_close(actual[key], expected[key], rtol=1e-5,
-                                       atol=1e-8 if field == "parameters" else 0,
-                                       msg=lambda message: f"Parallel pilot {field}/{key}: {message}")
+            left, right = actual[key].detach(), expected[key].detach()
+            entry["tensor_count"] += 1
+            if left.shape != right.shape or left.dtype != right.dtype:
+                entry["failed_tensors"].append({"name": key, "error": "Shape or dtype mismatch"})
+                continue
+            left, right = left.double(), right.to(device=left.device, dtype=torch.float64)
+            if not (torch.isfinite(left).all() & torch.isfinite(right).all()).item():
+                entry["failed_tensors"].append({"name": key, "error": "Nonfinite tensor"})
+                continue
+            delta = (left - right).abs()
+            maximum = delta.max().item()
+            norm, error_norm = right.norm().item(), delta.norm().item()
+            relative = error_norm / norm if norm else (0.0 if error_norm == 0 else None)
+            if relative is not None and not isfinite(relative):
+                relative = None
+            mismatches = int((delta > atol + 1e-5 * right.abs()).sum().item())
+            entry["max_abs_error"] = max(entry["max_abs_error"], maximum)
+            if relative is not None:
+                entry["max_relative_l2"] = max(entry["max_relative_l2"], relative)
+            bad_gradient_norm = field == "last_gradients" and (relative is None or relative > 1e-5)
+            if mismatches or bad_gradient_norm:
+                entry["failed_tensors"].append({"name": key, "max_abs_error": maximum,
+                                                "relative_l2": relative, "mismatched_elements": mismatches})
+        entry["passed"] = not entry["failed_tensors"]
+    result["passed"] = (result["step_matches"] and scalar["passed"]
+                        and all(entry["passed"] for entry in result["fields"].values()))
+    return result
 
 
 def train(args, identity, experiment, assets, schedule, *, until=None, lease_held=False, deadline=None):
@@ -392,6 +433,7 @@ def train(args, identity, experiment, assets, schedule, *, until=None, lease_hel
         reference = None
         if len(devices) == 2 and experiment["kind"] == "pilot":
             reference = make_runtime(assets, checkpoint, devices)
+            runtime.capture_gradients = reference.capture_gradients = True
             resources.callback(reference.close)
         if runtime.tokenizer_sha256 != assets["tokenizer"][1]["sha256"]:
             raise ValueError("Checkpoint tokenizer differs from the experiment")
@@ -428,10 +470,24 @@ def train(args, identity, experiment, assets, schedule, *, until=None, lease_hel
                 elapsed = monotonic() - began
                 peaks = runtime.peak_memory_stats() if devices else {}
                 if reference is not None:
+                    before = reference.snapshot_training_state()
                     reference_loss = reference.train_step(batch)
-                    verify_parallel_update(runtime, reference, loss, reference_loss)
+                    after = reference.snapshot_training_state()
+                    reference.restore_training_state(before)
+                    repeated_loss = reference.train_step(batch)
+                    repeated = verify_parallel_update(reference, SimpleNamespace(**after), repeated_loss, reference_loss)
+                    reference.restore_training_state(after)
+                    compared = verify_parallel_update(runtime, SimpleNamespace(**after), loss, reference_loss)
+                    run.event("pilot_numerical_audit", step=runtime.step, sequential_repeat=repeated, parallel=compared)
+                    if not repeated["passed"] or not compared["passed"]:
+                        failed = [name for name, audit in (("sequential repeat", repeated), ("paired update", compared))
+                                  if not audit["passed"]]
+                        raise FloatingPointError(f"Pilot numerical audit failed ({', '.join(failed)}); "
+                                                 f"all differences saved in {run.path / 'events.jsonl'}")
+                    run.event("sequential_repeat_verified", step=runtime.step)
                     run.event("parallel_parity_verified", step=runtime.step, rtol=1e-5,
-                              parameter_atol=1e-8, optimizer_atol=0)
+                              parameter_atol=1e-8, optimizer_atol=0, gradients_checked=True)
+                    del before, after, repeated, compared
                 if runtime.step != initial_step + update + 1:
                     raise RuntimeError("Runtime cursor did not advance by one update")
                 at_milestone = update + 1 in milestones
@@ -773,7 +829,24 @@ def volume_compare(args):
 
 
 
+def configure_parallel_numerics():
+    import torch
+
+    workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    if workspace is None:
+        if torch.cuda.is_initialized():
+            raise RuntimeError("Deterministic cuBLAS workspace must be configured before CUDA initialization")
+        workspace = ":4096:8"
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = workspace
+    if workspace not in (":4096:8", ":16:8"):
+        raise ValueError("Four-GPU mode requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8")
+    torch.use_deterministic_algorithms(True, warn_only=False)
+    return {"policy": "strict-deterministic-v1", "deterministic_algorithms": True,
+            "warn_only": False, "cublas_workspace_config": workspace}
+
+
 def parallel_context():
+    numerics = configure_parallel_numerics()
     import torch
 
     config, assets = load_config("volume")
@@ -791,7 +864,7 @@ def parallel_context():
     uuids = [entry["uuid"] for entry in visible if entry["uuid"] != "unavailable"]
     if len(uuids) != len(set(uuids)):
         raise RuntimeError("The four visible GPU indices must identify distinct physical devices")
-    runtime.update(devices=visible, cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
+    runtime.update(devices=visible, cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"), numerics=numerics)
     arms = config["volume"]["arms"]
     pairs = {arm: (2 * i, 2 * i + 1) for i, arm in enumerate(arms)}
     pilot = config["volume"]["pilot"]["id"]
@@ -803,7 +876,7 @@ def parallel_context():
     for name, (experiment_id, devices) in entries.items():
         experiment, _, record = prepared[experiment_id]
         identity = run_identity(experiment_id, config, experiment, assets, record, runtime=runtime)
-        identity["execution"] = {"mode": "paired-microbatches-v1", "devices": list(devices),
+        identity["execution"] = {"mode": "paired-microbatches-v2", "devices": list(devices),
                                  "gradient_reduction": "sum", "examples_per_update": 2}
         identities[name] = identity
     return config, assets, prepared, milestones, identities, pairs
@@ -993,7 +1066,7 @@ def main():
     elif args.command == "check":
         check(args.suite)
     elif args.command == "compare":
-        args.run_id = args.run_id or ("train-volume-v1-4gpu" if args.gpus == 4 else "train-volume-v1")
+        args.run_id = args.run_id or ("train-volume-v1-4gpu-v2" if args.gpus == 4 else "train-volume-v1")
         if args.worker:
             if args.gpus != 4 or args.lease_fd is None or args.parent_fd is None:
                 parser.error("Workers must be launched by the four-GPU coordinator")
