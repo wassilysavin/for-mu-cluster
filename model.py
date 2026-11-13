@@ -191,7 +191,11 @@ def read_checkpoint(path: Path, device: torch.device):
 
 
 class Runtime:
-    def __init__(self, base_path: Path, checkpoint_path: Path, *, device: str = "cuda"):
+    def __init__(self, base_path: Path, checkpoint_path: Path, *, device: str = "cuda",
+                 expected_batch_size: int = 2):
+        if type(expected_batch_size) is not int or expected_batch_size not in (2, 4):
+            raise ValueError("The runtime supports batches of two or four examples")
+        self.expected_batch_size = expected_batch_size
         self.device = torch.device(device)
         if (sys.platform != "linux" or self.device.type != "cuda" or not torch.cuda.is_available()
                 or torch.__version__.split("+")[0] != "2.7.1"
@@ -365,8 +369,8 @@ class Runtime:
             raise ValueError("Invalid complete token sequence")
 
     def train_step(self, examples: Sequence[tuple[list[int], list[int]]]) -> float:
-        if len(examples) != 2:
-            raise ValueError("One update requires two microbatches")
+        if len(examples) != getattr(self, "expected_batch_size", 2):
+            raise ValueError("The update batch size differs from the declared recipe")
         for prompt, completion in examples:
             self._validate_tokens(prompt, CONTEXT)
             self._validate_tokens(completion, CONTEXT - len(prompt))
@@ -466,27 +470,32 @@ class Runtime:
         self.lineage = dict(lineage)
 
 
-class PairedRuntime(Runtime):
-    """Run the two microbatches concurrently, with one primary optimizer."""
+class ReplicatedRuntime(Runtime):
+    """Process one example per device and apply one token-weighted update."""
 
     def __init__(self, base_path: Path, checkpoint_path: Path, *, devices: Sequence[str]):
         selected = tuple(torch.device(device) for device in devices)
-        if (len(selected) != 2 or len(set(selected)) != 2
+        if (len(selected) not in (2, 4) or len(set(selected)) != len(selected)
                 or any(device.type != "cuda" or device.index is None for device in selected)):
-            raise ValueError("Paired training requires two distinct explicit CUDA devices")
+            raise ValueError("Replicated training requires two or four distinct explicit CUDA devices")
         self._devices = selected
         self._closed = False
         self._failed = False
-        super().__init__(base_path, checkpoint_path, device=str(selected[0]))
-        self._peer = Runtime(base_path, checkpoint_path, device=str(selected[1]))
-        if self._peer._metadata != self._metadata or self._peer.step != self.step:
-            raise ValueError("Paired replicas loaded different checkpoints")
+        super().__init__(base_path, checkpoint_path, device=str(selected[0]), expected_batch_size=len(selected))
+        self._peers = tuple(Runtime(base_path, checkpoint_path, device=str(device),
+                                    expected_batch_size=len(selected)) for device in selected[1:])
+        if any(peer._metadata != self._metadata or peer.step != self.step for peer in self._peers):
+            raise ValueError("Replicas loaded different checkpoints")
         self.synchronize()
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gemprf-microbatch")
+        self._executor = ThreadPoolExecutor(max_workers=len(selected), thread_name_prefix="gemprf-microbatch")
 
     @property
     def devices(self) -> tuple[torch.device, ...]:
         return self._devices
+
+    @property
+    def _peer(self):
+        return self._peers[0] if self._peers else None
 
     @staticmethod
     def _microbatch(runtime, example, count, index):
@@ -500,40 +509,45 @@ class PairedRuntime(Runtime):
                 torch.cuda.synchronize(runtime.device)
                 return loss.detach()
             except FloatingPointError as error:
-                raise FloatingPointError(f"Example {index} of 2: {error}") from error
+                raise FloatingPointError(f"Example {index} of {runtime.expected_batch_size}: {error}") from error
 
     def train_step(self, examples: Sequence[tuple[list[int], list[int]]]) -> float:
         if self._closed or self._failed:
-            raise RuntimeError("The paired runtime is closed or failed")
-        if len(examples) != 2:
-            raise ValueError("One update requires two microbatches")
+            raise RuntimeError("The replicated runtime is closed or failed")
+        if len(examples) != self.expected_batch_size:
+            raise ValueError("The update batch size differs from the declared recipe")
         for prompt, completion in examples:
             self._validate_tokens(prompt, CONTEXT)
             self._validate_tokens(completion, CONTEXT - len(prompt))
-        if self._peer.step != self.step:
-            raise RuntimeError("The paired replicas have different update cursors")
+        if any(peer.step != self.step for peer in self._peers):
+            raise RuntimeError("The replicas have different update cursors")
         count = sum(len(completion) for _, completion in examples)
         futures = []
         try:
-            for index, (runtime, example) in enumerate(zip((self, self._peer), examples), start=1):
+            for index, (runtime, example) in enumerate(zip((self, *self._peers), examples), start=1):
                 futures.append(self._executor.submit(self._microbatch, runtime, example, count, index))
             wait(futures)
             losses = [future.result() for future in futures]
             with torch.cuda.device(self.device), torch.cuda.stream(torch.cuda.default_stream(self.device)):
                 mean_loss = torch.stack([loss.to(self.device) for loss in losses]).sum().item()
                 for name, parameter in self.parameters.items():
-                    other = self._peer.parameters[name].grad
-                    if parameter.grad is None or other is None:
-                        raise RuntimeError(f"Missing paired adapter gradient: {name}")
-                    parameter.grad.add_(other.to(self.device))
+                    if parameter.grad is None:
+                        raise RuntimeError(f"Missing primary adapter gradient: {name}")
+                    for peer in self._peers:
+                        other = peer.parameters[name].grad
+                        if other is None:
+                            raise RuntimeError(f"Missing replica adapter gradient: {name}")
+                        parameter.grad.add_(other.to(self.device))
                 self._update()
                 torch.cuda.synchronize(self.device)
-            with torch.no_grad(), torch.cuda.device(self._peer.device), torch.cuda.stream(
-                    torch.cuda.default_stream(self._peer.device)):
-                for name, parameter in self.parameters.items():
-                    self._peer.parameters[name].copy_(parameter)
+            for peer in self._peers:
+                with torch.no_grad(), torch.cuda.device(peer.device), torch.cuda.stream(
+                        torch.cuda.default_stream(peer.device)):
+                    for name, parameter in self.parameters.items():
+                        peer.parameters[name].copy_(parameter)
             self.synchronize()
-            self._peer.step = self.step
+            for peer in self._peers:
+                peer.step = self.step
             return mean_loss
         except BaseException:
             self._failed = True
@@ -546,17 +560,26 @@ class PairedRuntime(Runtime):
                 self._failed = True
                 raise
             finally:
-                for runtime in (self, self._peer):
+                for runtime in (self, *self._peers):
                     for parameter in runtime.parameters.values():
                         parameter.grad = None
 
     def save_checkpoint(self, path: Path, *, lineage: Mapping[str, str]) -> None:
         if self._closed or self._failed:
-            raise RuntimeError("Cannot save a closed or failed paired runtime")
+            raise RuntimeError("Cannot save a closed or failed replicated runtime")
         super().save_checkpoint(path, lineage=lineage)
 
     def close(self) -> None:
         if not self._closed:
             self._closed = True
             self._executor.shutdown(wait=True, cancel_futures=True)
-            self._peer = None
+            self._peers = ()
+
+
+class PairedRuntime(ReplicatedRuntime):
+    """Keep the original two-device experiment API."""
+
+    def __init__(self, base_path: Path, checkpoint_path: Path, *, devices: Sequence[str]):
+        if len(devices) != 2:
+            raise ValueError("Paired training requires two distinct explicit CUDA devices")
+        super().__init__(base_path, checkpoint_path, devices=devices)

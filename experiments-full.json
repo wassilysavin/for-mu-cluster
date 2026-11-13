@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "evaluation_id": "dev-volume-v1",
+  "recipe": {
+    "examples_per_update": 4,
+    "order": "fixed full-TRAIN positions repeated for three epochs; no shuffle or RNG",
+    "checkpoint_interval": 10
+  },
+  "train_rows_per_arm": 9432,
+  "assets": {
+    "train": {
+      "path": "assets/train-full-v2.jsonl",
+      "sha256": "024d21fba1d2fe73dc9f8d795552303acaeb099675d9d78df179c082c7e7afcb"
+    },
+    "dev": {
+      "path": "assets/dev-volume-v1.jsonl",
+      "sha256": "77450582e17c9c58656196047157227a58c0e8e42629c81cbe408337e9cd7e13"
+    }
+  },
+  "full": {
+    "pilot": {"id": "full-pilot", "updates": 2},
+    "baseline": "full-baseline",
+    "training": "full-course",
+    "epochs": 3,
+    "unique_train_examples": 2977,
+    "draws_per_epoch": 3144,
+    "max_elapsed_hours": 36,
+    "max_optimizer_updates": 3246,
+    "corpus_provenance": {
+      "retained_case_ids": 2941,
+      "new_constructed_recovery_cases": 36,
+      "corrected_retry_targets": 5,
+      "rebuilt_followup_histories": 5,
+      "clarified_new_recovery_questions": 1,
+      "corpus_manifest_sha256": "51a5febced94c48e318b5671c0ea9b43113c67eae62d2941a0567e3edf9ec890",
+      "independent_review_manifest_sha256": "3c1a04be55e7109c9e0ece6e88133a096e24965a35c92c1cb69daa39c9dc121f"
+    },
+    "evaluation": {
+      "id": "dev-volume-v1",
+      "dialogue_version": 2,
+      "cases": 155,
+      "supported": 131,
+      "outside_scope": 24,
+      "dialogues": 16
+    },
+    "selection": "Strictly more complete supported answers; preserve whole dialogues and outside-scope success, never increase unresolved reviews, no detected critical errors or missing cases. Keep earlier checkpoints on supported ties. DEV selection remains provisional."
+  },
+  "experiments": {
+    "full-pilot": {
+      "kind": "pilot",
+      "training": {"arm": "pilot", "dataset_id": "full-v2-extreme-batches", "draws": 8, "updates": 2}
+    },
+    "full-baseline": {"kind": "baseline"},
+    "full-course": {
+      "kind": "comparison",
+      "milestones": [786, 1572, 2358],
+      "training": {"arm": "full", "dataset_id": "full-train-v2", "updates": 2358}
+    }
+  }
+}

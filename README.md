@@ -1,11 +1,12 @@
 # GEM-pRF Functions cluster runs
 
-This repository contains frozen inputs and a runner for continuing FunctionGemma training from step 4847 on NVIDIA V100 GPUs. Both experiment suites require a successful FP32 pilot before training. The volume comparison supports one GPU or two concurrent arms on four GPUs.
+This repository contains frozen inputs and a runner for continuing FunctionGemma training from step 4847 on NVIDIA V100 GPUs. Every training course requires a successful FP32 pilot. The full course trains one model on four GPUs; the earlier volume experiment compares two datasets.
 
 | File or folder | Purpose |
 | --- | --- |
 | `experiments.json` | Architecture, training recipe, dataset identities and hashes, experiment IDs, and comparison criteria. |
 | `experiments-volume.json` | Frozen TRAIN volume comparison and fresh development suite. |
+| `experiments-full.json` | Full TRAIN course: batch four, three epochs, resource limits and checkpoint selection. |
 | `run.py` | The entry point for training, evaluation, and reports. |
 | `model.py`, `ledger.py` | The PyTorch model and checkpoint code, and the run log. |
 | `evaluate.mjs`, `evaluation/` | Development scoring against actual conversation history. |
@@ -14,12 +15,12 @@ This repository contains frozen inputs and a runner for continuing FunctionGemma
 
 ## Set up once
 
-Use Linux x86-64, Python 3.13, Node.js 22 or later, Git LFS, and a V100 allocation. Substitute your private repository URL in the clone command.
+Use Linux x86-64, Python 3.13, Node.js 22 or later, Git LFS, and a V100 allocation.
 
 ```sh
 git lfs install
-git clone https://github.com/YOUR_ORG/gemprf-cluster.git
-cd gemprf-cluster
+git clone https://github.com/wassilysavin/for-mu-cluster.git
+cd for-mu-cluster
 git lfs pull
 python -m venv .venv
 source .venv/bin/activate
@@ -28,6 +29,49 @@ python run.py check
 ```
 
 The repository attributes use Git LFS for weights and TRAIN. Use and distribution of the Gemma weights and derivatives are subject to the restrictions in section 3.2 of the bundled [Gemma Terms of Use](GEMMA-TERMS.md). The model changes are listed in [NOTICE](NOTICE).
+
+## Full TRAIN on four GPUs
+
+With earlier jobs stopped, use your existing environment and checkout:
+
+```sh
+git fetch origin
+git switch full-train-v2
+git pull --ff-only
+git lfs pull
+python run.py --suite full check
+python run.py full --gpus 4
+```
+
+This is one model trained from the bundled **4847 checkpoint**, not from a remote intermediate run. The frozen corpus contains 2,977 distinct examples: 2,941 retained examples and 36 reviewed recovery examples using the actual-dialogue v2 contract. Each epoch contains 3,144 presentations, including 120 outside-scope and 47 clarification repeats. Its fixed order repeats for three epochs. There is no random shuffle or mutable data generation on the cluster.
+
+Five retained retry targets are corrected for the v2 failed-exchange contract, and five later histories are rebuilt coherently from those corrections. The earlier dataset files remain unchanged. Each line of `assets/train-full-v2.jsonl` is one case: `question` is readable user text, `calls` is its supervised function program, and `history_origin` identifies the provenance of its context. `input_ids` contains tokenizer IDs, `prompt_tokens` marks the answer boundary, and `positions.full` / `positions.pilot` specify exactly when the case is presented. Constructed recovery examples are identified as constructed contexts; they are not represented as fresh model-error observations.
+
+Visible GPUs 0–3 each process one example, then their token-weighted gradients are summed for one Adafactor update. The global batch is **four**, intentionally different from the earlier volume experiment's batch of two. The learning rate remains 1e-4. Each epoch has 786 updates; epoch checkpoints are steps 5633, 6419 and 7205. This course therefore cannot isolate the effect of TRAIN size by comparison with the old batch-two runs.
+
+The runner first audits two extreme four-example batches against an independent sequential reference, repeats each reference update from identical state, and verifies checkpoint save/reload. Strict deterministic kernels, complete gradient capture and the numerical gates are mandatory. Pilot updates do not initialize the course. Next it evaluates the original 4847 on all 155 DEV cases, then trains and evaluates each full epoch. Evaluation preserves complete five-turn dialogues and runs on the primary GPU. TEST is absent from the course and remains closed.
+
+One shared execution lease covers the entire course. Frozen data, code, runtime and GPU identities are recorded. Checkpoints include optimizer state and the schedule cursor, and are saved every ten updates and at each epoch boundary. Reissue the same command after interruption; do not pull new code during a run. The command resumes its original identity, elapsed deadline and optimizer budget. Repeated or interrupted attempts consume the same budget; the maximum is 3,246 charged updates including pilot reference checks. The elapsed limit is 36 hours from the first start, including disconnected time and evaluations. A smaller `--hours` can be set only when first creating a course. The cluster allocation should also impose its hard walltime limit.
+
+Before each epoch, the runner checks remaining disk and estimated training-plus-DEV time. Its first estimate uses the slowest measured pilot update; later estimates use completed course updates with a safety margin. If another complete epoch cannot fit, it reports the checkpoints already evaluated. Inputs are shared, without additional dataset copies. Output-space admission counts the pilot checkpoint, three epoch checkpoints, one temporary checkpoint, four DEV logs and a 512 MiB free-space reserve. Existing files and other folders are not deleted.
+
+The default controller directory is `runs/full-train-v2-4gpu/`. Its `course.json` fixes the clock and experiment identities; `optimizer-budget.json` records charged updates. `selection-epoch-N.json` records each provisional choice. Final `result.json` contains baseline and epoch scores, the selected checkpoint and any budget-related stop. Individual pilot, baseline and course logs are in the adjacent folders named with the same prefix.
+
+Selection requires strictly more complete supported answers while preserving whole-dialogue and outside-scope success, without increasing unresolved reviews or allowing detected critical errors. Equal supported scores keep the earlier checkpoint. This is provisional DEV selection; it is not product acceptance or a guarantee of quality.
+
+To survive an SSH disconnect, open a tmux session from the repository with your environment active:
+
+```sh
+tmux new -s gemprf-full
+```
+
+Inside that session, with the same environment active, start the course:
+
+```sh
+python -u run.py full --gpus 4
+```
+
+Detach with `Ctrl-B`, then `D`. Reconnect after logging in with `tmux attach -t gemprf-full`. Start the course only once; reconnect to its existing session to inspect progress.
 
 ## Compare TRAIN volume
 

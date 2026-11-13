@@ -24,6 +24,7 @@ from ledger import SAFE_ID, code_record, execution_lease, file_record, open_run,
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "experiments.json"
 VOLUME_CONFIG = ROOT / "experiments-volume.json"
+FULL_CONFIG = ROOT / "experiments-full.json"
 ARCHITECTURE = "functiongemma270m-lora16-volta-fp32-v2"
 PILOT_EXPERIMENT = "pilot-4847-fp32"
 VOCABULARY = 262144
@@ -36,6 +37,10 @@ DISK_RESERVE_BYTES = 512 * MIB
 DEV_LOG_BUDGET_BYTES = 32 * MIB
 RUN_METADATA_BUDGET_BYTES = 8 * MIB
 WORKER_PARENT_FD = None
+
+
+class BudgetExhausted(RuntimeError):
+    pass
 
 
 def read_json(path):
@@ -57,8 +62,10 @@ def checked_asset(reference):
 
 
 class Schedule:
-    def __init__(self, path, expected_sha, arm, count, *, longest=False, probe=False, milestones=()):
+    def __init__(self, path, expected_sha, arm, count, *, longest=False, probe=False, milestones=(), batch_size=2):
         self.path = path
+        if batch_size not in (2, 4):
+            raise ValueError("The frozen schedule requires batches of two or four")
         slots = {}
         probe_rows = []
         seen = set()
@@ -99,15 +106,18 @@ class Schedule:
                     slots[index] = entry
         if digest.hexdigest() != expected_sha:
             raise ValueError("TRAIN changed during schedule verification")
-        if len(slots) != count or count < EXAMPLES_PER_UPDATE or count % EXAMPLES_PER_UPDATE:
+        if len(slots) != count or count < batch_size or count % batch_size:
             raise ValueError(f"Incomplete {arm} schedule, expected {count} positions")
         self.rows = [slots[index] for index in range(count)]
-        for offset in range(0, count, EXAMPLES_PER_UPDATE):
-            if len({row[0] for row in self.rows[offset:offset + EXAMPLES_PER_UPDATE]}) != EXAMPLES_PER_UPDATE:
+        for offset in range(0, count, batch_size):
+            if len({row[0] for row in self.rows[offset:offset + batch_size]}) != batch_size:
                 raise ValueError(f"Repeated case within a batch at draw {offset}")
         if milestones:
-            boundary = milestones[0] * EXAMPLES_PER_UPDATE
-            if count != 2 * boundary or self.rows[:boundary] != self.rows[boundary:]:
+            boundary = milestones[0] * batch_size
+            if (list(milestones) != [milestones[0] * i for i in range(1, len(milestones) + 1)]
+                    or count != len(milestones) * boundary
+                    or any(self.rows[start:start + boundary] != self.rows[:boundary]
+                           for start in range(boundary, count, boundary))):
                 raise ValueError(f"{arm} must repeat its exact first-pass draw order")
         if longest:
             unique = {row[0]: row for row in self.rows}
@@ -138,14 +148,18 @@ class Schedule:
 
 def load_config(suite="legacy"):
     config = read_json(CONFIG)
-    if suite == "volume":
-        volume = read_json(VOLUME_CONFIG)
-        config = {**config, **volume, "assets": {**config["assets"], **volume["assets"]}}
+    if suite in ("volume", "full"):
+        extra = read_json(VOLUME_CONFIG if suite == "volume" else FULL_CONFIG)
+        config = {**config, **extra, "recipe": {**config["recipe"], **extra.get("recipe", {})},
+                  "assets": {**config["assets"], **extra["assets"]}}
     architecture = config["architecture"]
     if architecture["id"] != ARCHITECTURE or architecture["context_tokens"] != CONTEXT:
         raise ValueError("This runner supports the declared Volta architecture")
-    if config["recipe"]["examples_per_update"] != EXAMPLES_PER_UPDATE:
+    if config["recipe"]["examples_per_update"] != (4 if suite == "full" else EXAMPLES_PER_UPDATE):
         raise ValueError("The configured batch size differs from the runtime")
+    if suite == "full" and not re.fullmatch(r"[a-f0-9]{64}", config["full"].get("corpus_provenance", {}).get(
+            "independent_review_manifest_sha256", "")):
+        raise ValueError("The full corpus independent-review manifest is not frozen")
     assets = {name: checked_asset(ref) for name, ref in config["assets"].items()}
     return config, assets
 
@@ -157,12 +171,13 @@ def select_experiment(config, assets, experiment_id):
     train_record = None
     if training:
         path, record = assets["train"]
+        batch_size = config["recipe"].get("examples_per_update", EXAMPLES_PER_UPDATE)
         probe = experiment["kind"] == "pilot" and "volume" in config
         schedule = Schedule(path, record["sha256"], training["arm"],
                             training.get("draws", config["train_rows_per_arm"]),
-                            longest=experiment["kind"] == "pilot" and not probe, probe=probe,
-                            milestones=experiment.get("milestones", ()))
-        if len(schedule.rows) != EXAMPLES_PER_UPDATE * training["updates"]:
+                            longest=experiment["kind"] == "pilot" and not probe and "full" not in config,
+                            probe=probe, milestones=experiment.get("milestones", ()), batch_size=batch_size)
+        if len(schedule.rows) != batch_size * training["updates"]:
             raise ValueError("Training budget must match the frozen schedule")
         train_record = dict(record, dataset_id=training["dataset_id"], arm=training["arm"],
                             schedule_sha256=schedule.sha256, rows=len(schedule.rows))
@@ -193,6 +208,37 @@ def volume_experiments(config, assets):
     return prepared, milestones
 
 
+def full_experiments(config, assets):
+    full = config["full"]
+    names = (full["pilot"]["id"], full["baseline"], full["training"])
+    if len(set(names)) != 3:
+        raise ValueError("The full course requires distinct pilot, baseline and training identities")
+    prepared = {name: select_experiment(config, assets, name) for name in names}
+    pilot, baseline, course = (prepared[name][0] for name in names)
+    milestones = course.get("milestones", [])
+    epoch_updates = full["draws_per_epoch"] // 4
+    if (config["recipe"]["examples_per_update"] != 4 or full["draws_per_epoch"] % 4
+            or full["epochs"] != 3 or milestones != [epoch_updates * i for i in (1, 2, 3)]
+            or pilot["kind"] != "pilot" or pilot["training"]["updates"] != 2
+            or full["pilot"]["updates"] != 2 or baseline["kind"] != "baseline"
+            or course["kind"] != "comparison" or course["training"]["arm"] != "full"
+            or course["training"]["updates"] != milestones[-1]
+            or milestones[-1] + 3 * pilot["training"]["updates"] > 3246
+            or full["max_elapsed_hours"] != 36 or full["max_optimizer_updates"] != 3246):
+        raise ValueError("Full course must preserve its frozen three-epoch, batch-four resource plan")
+    schedule = prepared[names[-1]][1]
+    if len({row[0] for row in schedule.rows}) != full["unique_train_examples"]:
+        raise ValueError("Full TRAIN unique example count differs from the declared corpus")
+    unique = {row[0]: row for row in schedule.rows}
+    probe = prepared[names[0]][1].rows
+    longest = sorted((row[2] for row in unique.values()), reverse=True)[:4]
+    if (len(probe) != 8 or any(row[0] not in unique or row != unique[row[0]] for row in probe)
+            or sorted((row[2] for row in probe[:4]), reverse=True) != longest
+            or max(row[4] for row in probe[4:]) != max(row[4] for row in unique.values())):
+        raise ValueError("Full pilot must cover the four longest inputs and the longest supervised target")
+    return prepared, milestones
+
+
 def runtime_identity():
     if platform.system() != "Linux":
         raise RuntimeError("Use a Linux GPU allocation for train and test")
@@ -215,9 +261,9 @@ def runtime_identity():
 def run_identity(experiment_id, config, experiment, assets, train_record, *, runtime=None):
     code = ["run.py", "model.py", "ledger.py", "evaluate.mjs", "requirements.txt", "experiments.json"]
     code.extend(path.relative_to(ROOT).as_posix() for path in (ROOT / "evaluation").glob("*.mjs"))
-    suite = config.get("volume")
+    suite = config.get("volume") or config.get("full")
     if suite:
-        code.append(VOLUME_CONFIG.name)
+        code.append(FULL_CONFIG.name if "full" in config else VOLUME_CONFIG.name)
     evaluation = dict(assets["dev"][1], split="DEV700", dataset_id=config["evaluation_id"],
                       registry=assets["registry"][1])
     recipe = dict(config["recipe"], kind=experiment["kind"], training=experiment.get("training"))
@@ -260,6 +306,36 @@ def snapshot(latest, step):
     return path
 
 
+def full_pilot_audit_valid(proof, step, tensor_count):
+    if (not isinstance(proof, dict) or proof.get("passed") is not True or proof.get("step") != step
+            or proof.get("step_matches") is not True):
+        return False
+    loss = proof.get("loss", {})
+    if (not isinstance(loss, dict) or loss.get("passed") is not True
+            or not all(type(loss.get(key)) in (int, float) and isfinite(loss[key]) and loss[key] >= 0
+                       for key in ("actual", "expected", "abs_error", "limit"))):
+        return False
+    difference = abs(loss["actual"] - loss["expected"])
+    limit = 1e-7 + 1e-5 * abs(loss["expected"])
+    relative = difference / abs(loss["expected"]) if loss["expected"] else None
+    if (loss["abs_error"] != difference or loss["limit"] != limit or difference > limit
+            or "relative_error" not in loss or loss["relative_error"] != relative):
+        return False
+    fields = proof.get("fields", {})
+    if not isinstance(fields, dict) or set(fields) != {"parameters", "rows", "cols", "last_gradients"}:
+        return False
+    for name, value in fields.items():
+        if (not isinstance(value, dict) or value.get("passed") is not True
+                or type(value.get("tensor_count")) is not int or value["tensor_count"] != tensor_count
+                or value.get("failed_tensors") != [] or value.get("rtol") != 1e-5
+                or value.get("atol") != (1e-8 if name in ("parameters", "last_gradients") else 0)
+                or not all(type(value.get(key)) in (int, float) and isfinite(value[key]) and value[key] >= 0
+                           for key in ("max_abs_error", "max_relative_l2"))
+                or (name == "last_gradients" and value["max_relative_l2"] > 1e-5)):
+            return False
+    return True
+
+
 def require_pilot(runs, pilot_run_id, identity):
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}", pilot_run_id):
         raise ValueError("Invalid pilot run ID")
@@ -275,7 +351,7 @@ def require_pilot(runs, pilot_run_id, identity):
     checkpoint = file_record(path / "checkpoint.safetensors")
     verified = False
     measurements = {}
-    parity_steps, repeat_steps = set(), set()
+    parity_steps, repeat_steps, audits = set(), set(), {}
     with (path / "events.jsonl").open() as stream:
         for line in stream:
             if not line.endswith("\n"):
@@ -288,6 +364,8 @@ def require_pilot(runs, pilot_run_id, identity):
                 parity_steps.add(event["details"]["step"])
             if event["event"] == "sequential_repeat_verified":
                 repeat_steps.add(event["details"]["step"])
+            if event["event"] == "pilot_numerical_audit":
+                audits[event["details"]["step"]] = event["details"]
             if event["event"] == "pilot_reload_verified":
                 verified = (event["details"]["checkpoint"] == checkpoint
                             and event["details"]["step"] == identity["recipe"]["initial_step"] + pilot["updates"])
@@ -296,7 +374,14 @@ def require_pilot(runs, pilot_run_id, identity):
     if identity.get("execution"):
         expected = {identity["recipe"]["initial_step"] + i + 1 for i in range(pilot["updates"])}
         if recorded.get("execution") != identity["execution"] or not expected <= parity_steps & repeat_steps:
-            raise ValueError("The GPU pair must pass both sequential-versus-parallel pilot updates")
+            raise ValueError("The GPU replicas must pass both sequential-versus-parallel pilot updates")
+        if identity["execution"]["mode"] == "four-replica-batch4-v1":
+            tensor_count = identity["architecture"]["layers"] * 14
+            for step in expected:
+                audit = audits.get(step, {})
+                for name in ("sequential_repeat", "parallel"):
+                    if not full_pilot_audit_valid(audit.get(name), step, tensor_count):
+                        raise ValueError("Full pilot lacks complete numerical audit evidence")
     return list(measurements.values())
 
 
@@ -308,7 +393,7 @@ def check_deadline(deadline):
         except BlockingIOError:
             pass
     if deadline is not None and time() >= deadline:
-        raise RuntimeError("Comparison time budget exhausted. Saved checkpoints and completed evaluations remain available.")
+        raise BudgetExhausted("Comparison time budget exhausted. Saved checkpoints and completed evaluations remain available.")
 
 
 def require_run_space(path, additional_bytes):
@@ -335,13 +420,18 @@ def verify_frozen_inputs(identity, assets, names):
             raise ValueError(f"Experiment input changed: {record['path']}")
 
 
-def make_runtime(assets, checkpoint, devices=(), *, paired=False):
+def make_runtime(assets, checkpoint, devices=(), *, paired=False, batch_size=2):
     from model import Runtime
 
     if paired:
+        if len(devices) == 4:
+            from model import ReplicatedRuntime
+            return ReplicatedRuntime(assets["base"][0], checkpoint, devices=[f"cuda:{index}" for index in devices])
         from model import PairedRuntime
         return PairedRuntime(assets["base"][0], checkpoint, devices=[f"cuda:{index}" for index in devices])
     options = {"device": f"cuda:{devices[0]}"} if devices else {}
+    if batch_size != 2:
+        options["expected_batch_size"] = batch_size
     return Runtime(assets["base"][0], checkpoint, **options)
 
 
@@ -400,11 +490,29 @@ def verify_parallel_update(parallel, sequential, loss, reference_loss):
     return result
 
 
+def claim_optimizer_budget(args, updates):
+    budget = getattr(args, "optimizer_budget", None)
+    if budget is None:
+        return
+    record = dict(budget["record"])
+    if record["charged_updates"] + updates > record["maximum_updates"]:
+        raise BudgetExhausted("Full-course optimizer update budget exhausted")
+    record["charged_updates"] += updates
+    path = budget["path"]
+    with TemporaryDirectory(dir=path.parent) as staging:
+        candidate = Path(staging) / path.name
+        publish_json(candidate, record)
+        os.replace(candidate, path)
+        fsync_directory(path.parent)
+    budget["record"] = record
+
+
 def train(args, identity, experiment, assets, schedule, *, until=None, lease_held=False, deadline=None):
     import torch
     from model import LAYERS, LEARNING_RATE, LOSS_SCALE
 
     recipe = identity["recipe"]
+    batch_size = recipe.get("examples_per_update", EXAMPLES_PER_UPDATE)
     if (schedule is None or recipe["learning_rate"] != LEARNING_RATE or recipe["loss_scale"] != LOSS_SCALE
             or identity["architecture"]["layers"] != LAYERS):
         raise ValueError("The experiment must declare the runtime's training recipe")
@@ -428,11 +536,11 @@ def train(args, identity, experiment, assets, schedule, *, until=None, lease_hel
         lineage = {"identity_sha256": run.identity_sha256,
                    "initial_checkpoint_sha256": assets["initial_checkpoint"][1]["sha256"]}
         devices = getattr(args, "devices", ())
-        runtime = make_runtime(assets, checkpoint, devices, paired=len(devices) == 2)
+        runtime = make_runtime(assets, checkpoint, devices, paired=len(devices) in (2, 4), batch_size=batch_size)
         resources.callback(getattr(runtime, "close", lambda: None))
         reference = None
-        if len(devices) == 2 and experiment["kind"] == "pilot":
-            reference = make_runtime(assets, checkpoint, devices)
+        if len(devices) in (2, 4) and experiment["kind"] == "pilot":
+            reference = make_runtime(assets, checkpoint, devices, batch_size=batch_size)
             runtime.capture_gradients = reference.capture_gradients = True
             resources.callback(reference.close)
         if runtime.tokenizer_sha256 != assets["tokenizer"][1]["sha256"]:
@@ -454,7 +562,8 @@ def train(args, identity, experiment, assets, schedule, *, until=None, lease_hel
         with schedule.path.open("rb") as stream:
             for update in range(done, limit):
                 check_deadline(deadline)
-                batch, case_ids = schedule.batch(stream, EXAMPLES_PER_UPDATE * update, EXAMPLES_PER_UPDATE)
+                batch, case_ids = schedule.batch(stream, batch_size * update, batch_size)
+                claim_optimizer_budget(args, 3 if reference is not None else 1)
                 if devices:
                     runtime.synchronize()
                     runtime.reset_peak_memory_stats()
@@ -494,7 +603,8 @@ def train(args, identity, experiment, assets, schedule, *, until=None, lease_hel
                 checkpoint_saved = (update + 1) % save_every == 0 or update + 1 == limit or at_milestone
                 if checkpoint_saved:
                     if lease_held:
-                        require_run_space(run.path, (2 if devices else 1) * (checkpoint_budget(assets) + RUN_METADATA_BUDGET_BYTES))
+                        require_run_space(run.path, (2 if len(devices) == 2 else 1)
+                                          * (checkpoint_budget(assets) + RUN_METADATA_BUDGET_BYTES))
                     save_latest(runtime, latest, lineage)
                     if at_milestone:
                         snapshot(latest, runtime.step)
@@ -507,14 +617,15 @@ def train(args, identity, experiment, assets, schedule, *, until=None, lease_hel
             resources.close()
             del runtime, reference
             torch.cuda.empty_cache()
-            restored = make_runtime(assets, latest, devices)
+            restored = make_runtime(assets, latest, devices, batch_size=batch_size)
             resources.callback(getattr(restored, "close", lambda: None))
             if restored.step != initial_step + updates or restored.lineage != lineage:
                 raise ValueError("Pilot checkpoint reload differs from the saved run")
             run.event("pilot_reload_verified", step=restored.step, checkpoint=file_record(latest))
 
 
-def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observations, *, suite=None, deadline=None):
+def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observations, *, suite=None, deadline=None,
+                   progress_label=None):
     from tokenizers import Tokenizer
 
     tokenizer = Tokenizer.from_file(str(tokenizer_path))
@@ -529,6 +640,7 @@ def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observation
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           text=True, encoding="utf-8") as process:
         score = None
+        generated = 0
         try:
             for line in process.stdout:
                 message = json.loads(line)
@@ -545,6 +657,9 @@ def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observation
                 raw_text = tokenizer.decode(raw_ids, skip_special_tokens=False)
                 process.stdin.write(compact({"raw_ids": raw_ids, "raw_text": raw_text}) + "\n")
                 process.stdin.flush()
+                generated += 1
+                if progress_label and (generated == 1 or generated % 10 == 0 or generated == expected):
+                    print(f"[{progress_label}] DEV generated {generated}/{expected}", flush=True)
             if process.wait() != 0 or score is None or score["aborted"] or score["observed_records"] != expected:
                 raise RuntimeError("The development evaluation did not complete. Inspect the observations and run log.")
             return score
@@ -586,7 +701,8 @@ def test(args, identity, experiment, assets, *, at=None, lease_held=False, deadl
         run.event("evaluation_started", step=runtime.step, observations=observations.name)
         began = monotonic()
         score = evaluate_model(runtime, assets["tokenizer"][0], assets["registry"][0], assets["dev"][0],
-                               observations, suite=suite, deadline=deadline)
+                               observations, suite=suite, deadline=deadline,
+                               **({"progress_label": args.run_id} if getattr(args, "progress", False) else {}))
         if suite is not None:
             verify_frozen_inputs(identity, assets, ("tokenizer", "registry", "dev"))
             require_run_space(run.path, RUN_METADATA_BUDGET_BYTES)
@@ -604,14 +720,16 @@ def test(args, identity, experiment, assets, *, at=None, lease_held=False, deadl
 
 def check_evaluation(config, assets):
     command = ["node", str(ROOT / "evaluate.mjs"), str(assets["registry"][0]), str(assets["dev"][0]), "--check"]
-    if "volume" in config:
-        command.append(compact(config["volume"]["evaluation"]))
+    suite = config.get("volume") or config.get("full")
+    if suite:
+        command.append(compact(suite["evaluation"]))
     subprocess.run(command, check=True)
 
 
 def check(suite="legacy"):
     config, assets = load_config(suite)
-    prepared = (volume_experiments(config, assets)[0] if suite == "volume"
+    prepared = (full_experiments(config, assets)[0] if suite == "full"
+                else volume_experiments(config, assets)[0] if suite == "volume"
                 else {name: select_experiment(config, assets, name) for name in config["experiments"]})
     for experiment_id, (_, schedule, record) in prepared.items():
         if schedule:
@@ -619,9 +737,9 @@ def check(suite="legacy"):
     check_evaluation(config, assets)
 
 
-def comparison_deadline(directory, hours, identities):
+def comparison_deadline(directory, hours, identities, *, filename="comparison.json"):
     binding = sha256(compact(identities).encode()).hexdigest()
-    path = directory / "comparison.json"
+    path = directory / filename
     if path.exists():
         record = read_json(path)
         if record["identity_sha256"] != binding or (hours is not None and hours != record["hours"]):
@@ -652,6 +770,10 @@ def volume_evaluation(job, identity, experiment, assets, *, at=None, deadline):
             or details["step"] != step or details["observed_records"] != identity["evaluation"]["suite"]["cases"]
             or result["metrics"]["missing"] != 0 or details["observations"] != file_record(observations)):
         raise ValueError(f"Incomplete or changed evaluation for {job.run_id} at {step}")
+    if identity.get("execution", {}).get("mode") == "four-replica-batch4-v1":
+        spec = identity["evaluation"]["suite"]
+        validate_full_metrics(result["metrics"], expected={"supported": spec["supported"],
+                              "outside_scope": spec["outside_scope"], "whole_dialogues": spec["dialogues"]})
     return result
 
 
@@ -845,12 +967,10 @@ def configure_parallel_numerics():
             "warn_only": False, "cublas_workspace_config": workspace}
 
 
-def parallel_context():
+def four_gpu_identity():
     numerics = configure_parallel_numerics()
     import torch
 
-    config, assets = load_config("volume")
-    prepared, milestones = volume_experiments(config, assets)
     runtime = runtime_identity()
     if torch.cuda.device_count() < 4:
         raise RuntimeError("--gpus 4 needs four visible V100 GPUs in the cluster allocation")
@@ -865,6 +985,13 @@ def parallel_context():
     if len(uuids) != len(set(uuids)):
         raise RuntimeError("The four visible GPU indices must identify distinct physical devices")
     runtime.update(devices=visible, cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"), numerics=numerics)
+    return runtime
+
+
+def parallel_context():
+    config, assets = load_config("volume")
+    prepared, milestones = volume_experiments(config, assets)
+    runtime = four_gpu_identity()
     arms = config["volume"]["arms"]
     pairs = {arm: (2 * i, 2 * i + 1) for i, arm in enumerate(arms)}
     pilot = config["volume"]["pilot"]["id"]
@@ -1035,10 +1162,237 @@ def volume_compare_parallel(args):
             publish_comparison(args.runs, directory, milestone, baseline, results, plan)
 
 
+def validate_full_metrics(metrics, *, expected=None):
+    for metric in ("supported", "whole_dialogues", "outside_scope"):
+        values = metrics.get(metric, {})
+        planned, passed = values.get("planned"), values.get("passed")
+        if (type(planned) is not int or type(passed) is not int or not 0 <= passed <= planned
+                or (expected is not None and planned != expected[metric])):
+            raise ValueError(f"Invalid full-course DEV counts for {metric}")
+    total = metrics["supported"]["planned"] + metrics["outside_scope"]["planned"]
+    for key in ("missing", "critical_detected", "critical_review_required"):
+        if type(metrics.get(key)) is not int or not 0 <= metrics[key] <= total:
+            raise ValueError(f"Invalid full-course DEV count: {key}")
+
+
+def full_selection(baseline, epochs):
+    validate_full_metrics(baseline["metrics"])
+    selected = baseline
+    decisions = []
+    for candidate in epochs:
+        score, previous = candidate["metrics"], selected["metrics"]
+        validate_full_metrics(score)
+        reasons = []
+        if score["missing"] or score["critical_detected"]:
+            reasons.append("missing_or_detected_critical")
+        for metric in ("supported", "whole_dialogues", "outside_scope"):
+            if score[metric]["planned"] != previous[metric]["planned"]:
+                raise ValueError("Course checkpoints have different DEV denominators")
+        if score["supported"]["passed"] <= previous["supported"]["passed"]:
+            reasons.append("no_supported_improvement")
+        for metric in ("whole_dialogues", "outside_scope"):
+            if score[metric]["passed"] < previous[metric]["passed"]:
+                reasons.append(f"{metric}_regression")
+        if score["critical_review_required"] > previous["critical_review_required"]:
+            reasons.append("more_unresolved_reviews")
+        if not reasons:
+            selected = candidate
+        decisions.append({"step": candidate["details"]["step"], "selected_when_compared": not reasons,
+                          "reasons": reasons})
+    eligible = not selected["metrics"]["missing"] and not selected["metrics"]["critical_detected"]
+    return {"status": "provisional_DEV_selection_pending_independent_review" if eligible else "no_eligible_checkpoint",
+            "release_ready": False, "eligible_for_provisional_selection": eligible,
+            "selected_run_id": selected["run_id"], "checkpoint": selected["checkpoint"],
+            "step": selected["details"]["step"], "metrics": selected["metrics"], "decisions": decisions}
+
+
+def full_budget(directory, identities, jobs):
+    path = directory / "optimizer-budget.json"
+    binding = sha256(compact(identities).encode()).hexdigest()
+    if path.exists():
+        record = read_json(path)
+        if (record.get("identity_sha256") != binding or record.get("maximum_updates") != 3246
+                or type(record.get("charged_updates")) is not int or not 0 <= record["charged_updates"] <= 3246):
+            raise ValueError("Invalid full-course optimizer budget receipt")
+    else:
+        if any((job.runs / job.run_id / "run.json").exists() for job in jobs):
+            raise ValueError("Existing full-course jobs are missing their optimizer budget receipt")
+        record = {"identity_sha256": binding, "maximum_updates": 3246, "charged_updates": 0}
+        publish_json(path, record)
+    return {"path": path, "record": record}
+
+
+def full_epoch_estimate(job, milestone, measurements, baseline, initial, previous):
+    pending = max(0, milestone - saved_updates(job.runs / job.run_id, initial))
+    checkpoint = job.runs / job.run_id / f"checkpoint-step-{initial + milestone}.safetensors"
+    if checkpoint.exists():
+        pending = 0
+    step_seconds = max(item["seconds"] for item in measurements)
+    events = job.runs / job.run_id / "events.jsonl"
+    if previous and events.exists():
+        observed = {}
+        with events.open() as stream:
+            for line in stream:
+                if not line.endswith("\n"):
+                    break
+                event = json.loads(line)
+                if event["event"] == "update":
+                    detail = event["details"]
+                    if initial < detail["step"] <= initial + previous:
+                        observed[detail["step"]] = detail["seconds"]
+        if len(observed) == previous and all(isfinite(value) and value > 0 for value in observed.values()):
+            step_seconds = sum(observed.values()) / len(observed)
+    return 1.15 * (pending * step_seconds + baseline["details"]["seconds"]) + 120
+
+
+def publish_full_report(directory, identities, baseline, epochs, budget, status, reason):
+    selection = full_selection(baseline, epochs)
+    result = {"schema_version": 1, "identity_sha256": sha256(compact(identities).encode()).hexdigest(),
+              "status": status, "reason": reason, "completed_epochs": len(epochs), "planned_epochs": 3,
+              "optimizer_budget": budget["record"], "baseline": baseline, "epochs": epochs,
+              "selection": selection, "TEST_opened": False}
+    path = directory / "result.json"
+    if path.exists():
+        if read_json(path) != result:
+            raise ValueError("The previously published full-course result changed")
+    else:
+        publish_json(path, result)
+    metrics = selection["metrics"]
+    chosen = (f"Provisional checkpoint step {selection['step']}" if selection["eligible_for_provisional_selection"]
+              else "No checkpoint passed the provisional selection safety checks")
+    print(f"Full course {status}: {len(epochs)}/3 epochs evaluated. {chosen}.",
+          flush=True)
+    print(f"Supported {metrics['supported']['passed']}/{metrics['supported']['planned']}; "
+          f"whole dialogues {metrics['whole_dialogues']['passed']}/{metrics['whole_dialogues']['planned']}; "
+          f"outside scope {metrics['outside_scope']['passed']}/{metrics['outside_scope']['planned']}; "
+          f"unresolved reviews {metrics['critical_review_required']}. Report: {path}", flush=True)
+    return result
+
+
+def full_course(args):
+    import torch
+
+    if not SAFE_ID.fullmatch(args.run_id) or len(args.run_id) > 75:
+        raise ValueError("Invalid full-course run ID")
+    with execution_lease(args.runs):
+        config, assets = load_config("full")
+        prepared, milestones = full_experiments(config, assets)
+        check_evaluation(config, assets)
+        hardware = four_gpu_identity()
+        torch.cuda.set_device(0)
+        identities = {}
+        for name, (experiment, _, record) in prepared.items():
+            identity = run_identity(name, config, experiment, assets, record, runtime=hardware)
+            identity["execution"] = {"mode": "four-replica-batch4-v1", "devices": [0, 1, 2, 3],
+                                     "gradient_reduction": "sum", "examples_per_update": 4}
+            identities[name] = identity
+        directory = args.runs / args.run_id
+        full = config["full"]
+        pilot_id, baseline_id, course_id = full["pilot"]["id"], full["baseline"], full["training"]
+        jobs = {name: SimpleNamespace(runs=args.runs, run_id=f"{args.run_id}-{name}", devices=(0, 1, 2, 3),
+                                     pilot_run_id=f"{args.run_id}-{pilot_id}", progress=True,
+                                     resume=(args.runs / f"{args.run_id}-{name}" / "run.json").is_file())
+                for name in prepared}
+        pilot_job, baseline_job, course_job = (jobs[name] for name in (pilot_id, baseline_id, course_id))
+        initial = config["recipe"]["initial_step"]
+        if not (directory / "result.json").is_file():
+            require_run_space(args.runs, comparison_space(args.runs, pilot_job.run_id, baseline_job.run_id,
+                              [course_job.run_id], [initial + value for value in milestones], assets))
+        deadline = comparison_deadline(directory, args.hours, identities, filename="course.json")
+        budget = full_budget(directory, identities, jobs.values())
+        for job in jobs.values():
+            job.optimizer_budget = budget
+        try:
+            measurements = require_pilot(args.runs, pilot_job.run_id, identities[course_id])
+        except (FileNotFoundError, ValueError):
+            print("Full pilot: four GPUs, batch four, two audited updates and save/reload", flush=True)
+            pilot_job.restart_pilot = True
+            experiment, schedule, _ = prepared[pilot_id]
+            train(pilot_job, identities[pilot_id], experiment, assets, schedule, lease_held=True, deadline=deadline)
+            measurements = require_pilot(args.runs, pilot_job.run_id, identities[course_id])
+        if (len(measurements) != 2 or any(not isfinite(item["seconds"]) or item["seconds"] <= 0
+                                       or item["peak_allocated_bytes"] <= 0 for item in measurements)):
+            raise ValueError("Full pilot is missing timing or memory evidence")
+        capacities = {f"cuda:{device['index']}": device["memory_bytes"] for device in hardware["devices"]}
+        expected_cases = {initial + i + 1: [row[0] for row in prepared[pilot_id][1].rows[4 * i:4 * (i + 1)]]
+                          for i in range(2)}
+        if {item["step"] for item in measurements} != set(expected_cases):
+            raise ValueError("Full pilot update cursors differ from its exact two-step schedule")
+        for measurement in measurements:
+            peaks = measurement.get("device_peak_bytes", {})
+            if (measurement.get("case_ids") != expected_cases.get(measurement["step"])
+                    or set(peaks) != set(capacities)
+                    or any(type(value) is not int or not 0 < value <= capacities[device]
+                           for device, value in peaks.items())):
+                raise ValueError("Full pilot lacks the exact batches or valid memory evidence from all four GPUs")
+        print("Baseline: original checkpoint 4847, all 155 DEV cases", flush=True)
+        baseline = volume_evaluation(baseline_job, identities[baseline_id], prepared[baseline_id][0], assets,
+                                     deadline=deadline)
+        torch.cuda.empty_cache()
+        epochs = []
+        existing = read_json(directory / "result.json") if (directory / "result.json").is_file() else None
+        if existing:
+            completed = existing.get("completed_epochs")
+            if (existing.get("identity_sha256") != sha256(compact(identities).encode()).hexdigest()
+                    or existing.get("status") not in ("complete", "budget_stopped")
+                    or type(completed) is not int or not 0 <= completed <= 3
+                    or len(existing.get("epochs", [])) != completed
+                    or (existing["status"] == "complete") != (completed == 3)
+                    or existing.get("baseline") != baseline or existing.get("optimizer_budget") != budget["record"]):
+                raise ValueError("Invalid or inconsistent full-course report")
+        for number, milestone in enumerate(milestones, start=1):
+            result_name = f"result-step-{initial + milestone}.json"
+            complete = (args.runs / course_job.run_id / result_name).is_file()
+            if existing and number > existing["completed_epochs"]:
+                break
+            if not complete:
+                estimate = full_epoch_estimate(course_job, milestone, measurements, baseline, initial,
+                                               milestones[number - 2] if number > 1 else 0)
+                remaining_updates = milestone - saved_updates(args.runs / course_job.run_id, initial)
+                if (time() + estimate >= deadline
+                        or budget["record"]["charged_updates"] + max(0, remaining_updates) > 3246):
+                    return publish_full_report(directory, identities, baseline, epochs, budget, "budget_stopped",
+                                               "Remaining budget cannot fit the next full epoch and its DEV evaluation")
+                require_run_space(args.runs, comparison_space(args.runs, pilot_job.run_id, baseline_job.run_id,
+                                  [course_job.run_id], [initial + value for value in milestones[number - 1:]], assets))
+                print(f"Epoch {number}/3: +{milestone} updates, batch four; estimated stage {estimate / 3600:.1f} h",
+                      flush=True)
+                checkpoint = args.runs / course_job.run_id / f"checkpoint-step-{initial + milestone}.safetensors"
+                try:
+                    if not checkpoint.exists():
+                        course_job.resume = (args.runs / course_job.run_id / "run.json").is_file()
+                        train(course_job, identities[course_id], prepared[course_id][0], assets, prepared[course_id][1],
+                              until=milestone, lease_held=True, deadline=deadline)
+                    torch.cuda.empty_cache()
+                    print(f"Epoch {number}/3: evaluating all 155 DEV cases", flush=True)
+                    result = volume_evaluation(course_job, identities[course_id], prepared[course_id][0], assets,
+                                               at=milestone, deadline=deadline)
+                except BudgetExhausted:
+                    return publish_full_report(directory, identities, baseline, epochs, budget, "budget_stopped",
+                                               "Fixed execution budget exhausted; unevaluated checkpoints are excluded")
+            else:
+                result = volume_evaluation(course_job, identities[course_id], prepared[course_id][0], assets,
+                                           at=milestone, deadline=deadline)
+            epochs.append(result)
+            selection = full_selection(baseline, epochs)
+            selection_path = directory / f"selection-epoch-{number}.json"
+            if selection_path.exists():
+                if read_json(selection_path) != selection:
+                    raise ValueError("An earlier full-course checkpoint selection changed")
+            else:
+                publish_json(selection_path, selection)
+            choice = (f"provisional best step {selection['step']}" if selection["eligible_for_provisional_selection"]
+                      else "no eligible checkpoint yet")
+            print(f"Epoch {number}/3 complete; {choice}", flush=True)
+        return publish_full_report(directory, identities, baseline, epochs, budget,
+                                   existing["status"] if existing else "complete", existing["reason"] if existing else
+                                   "Three full training epochs and their DEV evaluations completed")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=Path, default=ROOT / "runs", help="Shared run directory")
-    parser.add_argument("--suite", choices=("legacy", "volume"), default="legacy")
+    parser.add_argument("--suite", choices=("legacy", "volume", "full"), default="legacy")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check")
     commands.add_parser("report")
@@ -1052,6 +1406,10 @@ def main():
     comparison.add_argument("--until", type=int, help=argparse.SUPPRESS)
     comparison.add_argument("--lease-fd", type=int, help=argparse.SUPPRESS)
     comparison.add_argument("--parent-fd", type=int, help=argparse.SUPPRESS)
+    full = commands.add_parser("full", help="Train one model for three frozen epochs on four GPUs")
+    full.add_argument("--gpus", type=int, choices=(4,), default=4)
+    full.add_argument("--run-id", default="full-train-v2-4gpu")
+    full.add_argument("--hours", type=float, help="Fixed elapsed budget, at most 36 hours including disconnects")
     training = commands.add_parser("train")
     evaluation = commands.add_parser("test")
     for command in (training, evaluation):
@@ -1065,6 +1423,8 @@ def main():
         print(json.dumps(report(args.runs), indent=2))
     elif args.command == "check":
         check(args.suite)
+    elif args.command == "full":
+        full_course(args)
     elif args.command == "compare":
         args.run_id = args.run_id or ("train-volume-v1-4gpu-v2" if args.gpus == 4 else "train-volume-v1")
         if args.worker:
@@ -1076,8 +1436,8 @@ def main():
         else:
             volume_compare(args)
     else:
-        if args.suite == "volume":
-            parser.error("Use compare for the volume suite")
+        if args.suite != "legacy":
+            parser.error("Use compare for the volume suite or full for the full course")
         args.run_id = args.run_id or args.experiment
         config, assets = load_config()
         experiment, schedule, train_record = select_experiment(config, assets, args.experiment)
