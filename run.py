@@ -1429,6 +1429,8 @@ def main():
     history.add_argument("--run-id", default="actual-history-v3-4gpu")
     history.add_argument("--source-run-id", default="full-train-v2-4gpu")
     history.add_argument("--hours", type=float, help="Frozen model-worker budget, at most 36 hours")
+    history.add_argument("--repair-parity", action="store_true",
+                         help="Continue the failed boundary-513 run with a versioned official MATH reference and its original budget")
     diagnosis = commands.add_parser("diagnose-parity", help="Diagnose the failed boundary-513 check without training")
     diagnosis.add_argument("--run-id", default="actual-history-v3-4gpu")
     diagnosis.add_argument("--source-run-id", default="full-train-v2-4gpu")

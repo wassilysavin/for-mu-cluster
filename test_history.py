@@ -244,6 +244,211 @@ class DiagnosticDispatchTests(unittest.TestCase):
         self.assertEqual((self.directory / "budget.json").read_bytes(), before)
 
 
+class ReferenceRevisionTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = DiagnosticDispatchTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        f = self.fixture
+        f.args.hours, f.args.repair_parity = None, True
+        f.runner.BudgetExhausted = type("FakeBudgetExhausted", (RuntimeError,), {})
+        for name in ("registry", "history_dev"):
+            path = f.root / name
+            path.write_text(name)
+            record = h.file_record(path, relative_to=f.root)
+            f.assets[name] = (path, record)
+            f.manifest["assets"][name] = deepcopy(record)
+        f.config["evaluation"] = {}
+        f.write("experiment.json", f.manifest)
+        f.account["identity_sha256"] = h.digest(f.manifest)
+        before = deepcopy(f.account)
+        f.account["elapsed_seconds"] += 10
+        f.account["stages"].append({"name": "diagnose-parity", "seconds": 10, "interrupted": False})
+        f.write("budget.json", f.account)
+        self.diagnostics = f.directory / "diagnostics" / "parity-123"
+        self.diagnostics.mkdir(parents=True)
+        context = {"experiment_identity_sha256": h.digest(f.manifest),
+                   "original_manifest": h.file_record(f.directory / "experiment.json", relative_to=f.root),
+                   "original_failures": [h.file_record(f.directory / "parity/parity-failed.json", relative_to=f.root)],
+                   "runtime": f.manifest["runtime"], "training_allowed": False,
+                   "diagnostic_code": f.manifest["code"], "budget_before": before}
+        # The real hardware identity includes these fields before any model load.
+        f.manifest["runtime"].update(python="3.13", torch="2.7.1+cu118", cuda="11.8")
+        f.write("experiment.json", f.manifest)
+        identity = h.digest(f.manifest)
+        for value in (f.account, before):
+            value["identity_sha256"] = identity
+        f.write("budget.json", f.account)
+        context.update(experiment_identity_sha256=identity,
+                       original_manifest=h.file_record(f.directory / "experiment.json", relative_to=f.root))
+        h.publish_json(self.diagnostics / "context.json", context)
+        h.publish_json(self.diagnostics / "budget-after.json", f.account)
+        code = {row["path"]: row for row in f.manifest["code"]["files"]}
+        binding = {name: f.manifest["assets"][key] for name, key in (
+            ("checkpoint", "initial_checkpoint"), ("base", "base"), ("probes", "history_replay"))}
+        binding.update(implementation=code["history_parity.py"], runtime=code["model.py"])
+        self.report = {"diagnostic_only": True, "training_performed": False,
+                       "status": "DIAGNOSTIC_INCOMPLETE", "error": "AttributeError",
+                       "message": "'tuple' object has no attribute 'detach'", "binding": binding,
+                       "environment": dict(f.manifest["runtime"], transformers=parity.REFERENCE_VERSION),
+                       "tolerances": parity.TOLERANCES, "boundaries": []}
+        for length in (511, 512, 513, 514):
+            good = {"within_tolerance": True, "nonfinite_count": 0, "mismatch_count": 0,
+                    "maximum_absolute_error": 0.0001, "argmax_agreement": True, **parity.TOLERANCES["logits"]}
+            default = dict(good) if length != 513 else dict(good, within_tolerance=False,
+                mismatch_count=262010, maximum_absolute_error=24.6, argmax_agreement=False)
+            self.report["boundaries"].append({"length": length,
+                "mask": {"exact_equal": True, "mismatch_count": 0, "last_query_key_count": min(length, 512)},
+                "custom_vs_math": good, "custom_vs_default": default, "default_vs_math": dict(default)})
+        self.report_path = self.diagnostics / "diagnostic-124.json"
+        h.publish_json(self.report_path, self.report)
+        self.current = deepcopy(f.manifest)
+        self.parent_bytes = (f.directory / "experiment.json").read_bytes()
+        self.failure_bytes = (f.directory / "parity/parity-failed.json").read_bytes()
+
+    def revision(self):
+        f = self.fixture
+        return h.reference_revision(f.args, f.runner, self.current, parity)
+
+    def rewrite_report(self):
+        h.replace_json(self.report_path, self.report)
+
+    def test_partial_diagnostic_admits_only_full_gate_revision(self):
+        f = self.fixture
+        directory, manifest, budget_path, binding, hours, job = self.revision()
+        self.assertEqual(directory, f.directory / "revisions/math-reference-v1")
+        self.assertEqual(manifest["revision"]["reference_policy"], "math-chunked-v1")
+        self.assertEqual(budget_path, f.directory / "budget.json")
+        self.assertEqual(binding, h.digest(f.manifest))
+        self.assertEqual(hours, 36)
+        self.assertEqual(job.run_id, "blocked-math-reference-v1")
+        self.assertFalse((directory / "budget.json").exists())
+        self.assertFalse((directory / "parity/parity.json").exists())
+        self.assertEqual((f.directory / "experiment.json").read_bytes(), self.parent_bytes)
+        self.assertEqual((f.directory / "parity/parity-failed.json").read_bytes(), self.failure_bytes)
+
+    def test_resume_retains_spent_work_after_training_has_started(self):
+        initial = self.revision()
+        budget = h.Budget(initial[2], initial[3], initial[4])
+        budget.claim_updates(12)
+        with budget.phase("math-reference-v1/pilot"):
+            pass
+        resumed = self.revision()
+        self.assertEqual(resumed[:5], initial[:5])
+        self.assertEqual(h.read(resumed[2])["charged_updates"], 12)
+        self.assertGreaterEqual(h.read(resumed[2])["elapsed_seconds"], 35)
+
+    def test_existing_revision_rejects_new_code(self):
+        self.revision()
+        self.current["code"]["files"][0]["sha256"] = "new-code"
+        with self.assertRaisesRegex(ValueError, "Frozen record changed"):
+            self.revision()
+
+    def test_hours_cannot_reset_even_to_same_value(self):
+        self.fixture.args.hours = 36
+        with self.assertRaisesRegex(ValueError, "--hours"):
+            self.revision()
+
+    def test_new_revision_rejects_already_trained_parent(self):
+        f = self.fixture
+        f.account["charged_updates"] = 1
+        f.write("budget.json", f.account)
+        with self.assertRaisesRegex(ValueError, "pre-training"):
+            self.revision()
+
+    def test_rejects_missing_boundary(self):
+        self.report["boundaries"].pop()
+        self.rewrite_report()
+        with self.assertRaisesRegex(ValueError, "four-boundary"):
+            self.revision()
+
+    def test_rejects_math_mismatch(self):
+        self.report["boundaries"][2]["custom_vs_math"].update(within_tolerance=False, mismatch_count=1)
+        self.rewrite_report()
+        with self.assertRaisesRegex(ValueError, "four-boundary"):
+            self.revision()
+
+    def test_rejects_nonfinite_math(self):
+        self.report["boundaries"][2]["custom_vs_math"]["nonfinite_count"] = 1
+        self.rewrite_report()
+        with self.assertRaisesRegex(ValueError, "four-boundary"):
+            self.revision()
+
+    def test_rejects_unbound_diagnostic_source(self):
+        self.report["binding"]["checkpoint"] = {"path": "other", "sha256": "other", "bytes": 0}
+        self.rewrite_report()
+        with self.assertRaisesRegex(ValueError, "four-boundary"):
+            self.revision()
+
+    def test_rejects_changed_original_failure_after_creation(self):
+        self.revision()
+        f = self.fixture
+        f.failure["message"] = "different"
+        f.write("parity/parity-failed.json", f.failure)
+        with self.assertRaisesRegex(ValueError, "repair evidence changed"):
+            self.revision()
+
+    def test_rejects_budget_rollback_after_creation(self):
+        self.revision()
+        f = self.fixture
+        f.account["elapsed_seconds"] = 0
+        f.write("budget.json", f.account)
+        with self.assertRaisesRegex(ValueError, "rolled back"):
+            self.revision()
+
+    def test_rejects_changed_budget_stage_history(self):
+        self.revision()
+        f = self.fixture
+        f.account["stages"][0]["seconds"] = 0
+        f.write("budget.json", f.account)
+        with self.assertRaisesRegex(ValueError, "rolled back"):
+            self.revision()
+
+    def test_rejects_removed_budget_stage_history(self):
+        self.revision()
+        f = self.fixture
+        f.account["stages"] = []
+        f.write("budget.json", f.account)
+        with self.assertRaisesRegex(ValueError, "rolled back"):
+            self.revision()
+
+    def test_rejects_changed_assets_or_hardware(self):
+        self.current["runtime"]["gpu"] = "different"
+        with self.assertRaisesRegex(ValueError, "original runtime"):
+            self.revision()
+
+    def test_strict_gate_failure_blocks_collection_and_charges_old_budget(self):
+        f = self.fixture
+        with patch.object(h, "code_record", return_value=self.current["code"]), \
+             patch.object(h.subprocess, "run"), patch.object(prepare, "check"), \
+             patch.object(parity, "verify", side_effect=RuntimeError("strict parity block")) as gate, \
+             patch.object(prepare, "prepare") as collection:
+            with self.assertRaisesRegex(RuntimeError, "strict parity block"):
+                h.compare(f.args, f.runner)
+        collection.assert_not_called()
+        self.assertEqual(gate.call_args.kwargs, {"reference_policy": "math-chunked-v1"})
+        account = h.read(f.directory / "budget.json")
+        self.assertEqual(account["identity_sha256"], h.digest(f.manifest))
+        self.assertEqual(account["charged_updates"], 0)
+        self.assertGreaterEqual(account["elapsed_seconds"], 35)
+        self.assertEqual(account["stages"][-1]["name"], "math-reference-v1/official-parity")
+        self.assertTrue(account["stages"][-1]["interrupted"])
+        self.assertFalse((f.directory / "revisions/math-reference-v1/collection").exists())
+
+    def test_passing_full_gate_precedes_collection(self):
+        f = self.fixture
+        with patch.object(h, "code_record", return_value=self.current["code"]), \
+             patch.object(h.subprocess, "run"), patch.object(prepare, "check"), \
+             patch.object(parity, "verify", return_value={"passed": True}), \
+             patch.object(prepare, "prepare", side_effect=RuntimeError("stop at collection")) as collection:
+            with self.assertRaisesRegex(RuntimeError, "stop at collection"):
+                h.compare(f.args, f.runner)
+        collection.assert_called_once()
+        stage = f.directory / "revisions/math-reference-v1/stages/official-parity.json"
+        self.assertTrue(h.read(stage)["result"]["passed"])
+        self.assertFalse((f.directory / "parity/parity.json").exists())
+
+
 class Clock:
     def __init__(self):
         self.value = 1000.0
@@ -625,6 +830,27 @@ class ResumeTests(unittest.TestCase):
             (root / 'alias').symlink_to(root.parent)
             with self.assertRaises(ValueError):
                 h.contained(root / 'alias' / 'outside', root)
+
+
+class ParityLayerOutputTests(unittest.TestCase):
+    def test_direct_and_tuple_hidden_states(self):
+        hidden = SimpleNamespace(shape=(1, 513, 32), detach=lambda: None)
+        self.assertIs(parity.decoder_hidden_states(hidden), hidden)
+        self.assertIs(parity.decoder_hidden_states((hidden,)), hidden)
+        self.assertIs(parity.decoder_hidden_states((hidden, None)), hidden)
+
+    def test_invalid_decoder_output_is_rejected(self):
+        for value in (None, (), (None,), [], {}, (object(),)):
+            with self.subTest(value=value), self.assertRaises(TypeError):
+                parity.decoder_hidden_states(value)
+
+    def test_matching_but_unterminated_generation_is_rejected(self):
+        for tokens in ([], [1] * 512, [50, 1]):
+            with self.subTest(length=len(tokens)), self.assertRaisesRegex(AssertionError, 'function-response boundary'):
+                parity.require_complete_native_call(tokens)
+
+    def test_complete_generation_reaches_required_boundary(self):
+        parity.require_complete_native_call([2, 40, 50])
 
 
 class ParityRecoveryTests(unittest.TestCase):

@@ -29,17 +29,31 @@ The launcher overrides inherited temporary/cache settings before the child proce
 
 Python entry points also configure these paths, but the launcher is required to cover interpreter startup, pip and other child tools. This configures this workflow; it is not an operating-system sandbox for arbitrary commands. `.runtime/` is excluded from Git.
 
-## Current failed preflight: boundary-513
+## Corrected reference check after boundary-513
 
-If your existing run stopped with `AssertionError: boundary-513`, training has not started. After updating this branch, run:
+The reported V100 run stopped before training. At 513 tokens the automatic reference SDPA path changed the predicted token and differed from the forced-MATH reference by 24.614 in logits; our runtime differed from MATH by only 0.000075. The masks matched. This identifies a reference-backend disagreement, not a verified CUDA kernel defect or proof that every runtime path is correct. The subsequent tuple-output error in the diagnostic hook is fixed and checked against a real small Gemma3 decoder from Transformers 4.57.3.
+
+For this existing failed run, inside your active environment and existing tmux session:
 
 ```sh
+git pull --ff-only
 ./cluster python test_history.py
-./cluster python run.py --suite history check
+./cluster python -u run.py history --gpus 4 --repair-parity
+```
+
+`--repair-parity` creates the explicit `math-reference-v1` revision under the original run. It requires the saved original failure and bound 511/512/513/514 diagnostic observations, verifies the same checkpoint, assets, protocol and hardware, and preserves all old evidence. The revision shares the original budget and execution lease; time already spent is not reset. `--hours` cannot override this continuation.
+
+The official reference uses MATH with its own DynamicCache and prefill chunks of at most 256 tokens. Every prompt token is retained. Dense-MATH versus chunked-MATH controls check the window boundaries before the complete original parity gate: full prompts, cached generation, complete calls, loss, gradients, and checkpoint reload. Numerical tolerances and our model calculations remain unchanged. Training starts automatically only after these checks and the existing four-GPU pilot pass. Any new mismatch stops the run.
+
+For an ordinary interruption, repeat the same `./cluster python -u run.py history --gpus 4 --repair-parity` with the checkout unchanged. Revision reports are under `runs/actual-history-v3-4gpu/revisions/math-reference-v1/`; the original `budget.json` remains the shared account. The correction is prepared and CPU-tested locally; the real V100 gate still runs on your cluster.
+
+For diagnostics alone, before training starts:
+
+```sh
 ./cluster python run.py diagnose-parity --run-id actual-history-v3-4gpu
 ```
 
-The diagnostic reports numerical differences and attention backends without an optimizer update. It preserves the failed parity receipt, uses the same execution lease, and charges its time to the original budget. It neither marks parity as passed nor permits training. Do not delete the failed run, reset its budget, or restart it under a new ID. A corrected, explicitly versioned continuation will be needed after the actual cause is established.
+This command never admits or starts training. Existing diagnostic reports are retained. Do not delete the failed run, reset its budget, or restart the experiment under a new ID.
 
 ## Current experiment: actual-history-v3
 
@@ -58,7 +72,7 @@ git pull --ff-only
 ./cluster python -u run.py history --gpus 4
 ```
 
-If you are already inside tmux, run the command there. Otherwise create a private session with `./cluster tmux new -s gemprf-history` first. Reconnect to that session using `./cluster tmux attach -t gemprf-history`; earlier sessions created without the launcher still use their original socket. For an ordinary interruption, repeat **the same** `./cluster python -u run.py history --gpus 4` command with this checkout unchanged. Numerical parity failures require diagnosis as described above. One repository lease prevents duplicate model jobs.
+If you are already inside tmux, run the command there. Otherwise create a private session with `./cluster tmux new -s gemprf-history` first. Reconnect to that session using `./cluster tmux attach -t gemprf-history`; earlier sessions created without the launcher still use their original socket. For an ordinary interruption, repeat **the same** `./cluster python -u run.py history --gpus 4` command with this checkout unchanged. The recorded boundary-513 failure requires the explicit revision above; other numerical failures require investigation. One repository lease prevents duplicate model jobs.
 
 The run performs these stages automatically:
 

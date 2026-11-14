@@ -11,6 +11,11 @@ from time import time, time_ns
 from ledger import file_record, publish_json
 
 REFERENCE_VERSION = "4.57.3"
+REFERENCE_POLICIES = {
+    "auto": {"name": "auto", "version": 1, "backend": "automatic", "chunk_tokens": None},
+    "math-chunked-v1": {"name": "math-chunked-v1", "version": 1, "backend": "MATH",
+                        "chunk_tokens": 256, "cache": "transformers.DynamicCache"},
+}
 TOLERANCES = {
     "logits": {"rtol": 2e-4, "atol": 2e-3},
     "loss": {"rtol": 2e-4, "atol": 2e-5},
@@ -76,6 +81,31 @@ def compare_tensor(actual, expected, kind, label):
     return diagnostics
 
 
+def decoder_hidden_states(output):
+    hidden = output[0] if isinstance(output, tuple) and output else output
+    if not callable(getattr(hidden, "detach", None)) or not hasattr(hidden, "shape"):
+        raise TypeError("Reference decoder must return hidden states, directly or as tuple element zero")
+    return hidden
+
+
+def decoder_layer_record(module, inputs, output):
+    import torch
+    if not inputs or not isinstance(inputs[0], torch.Tensor) or inputs[0].ndim != 3:
+        raise TypeError("Reference decoder input must be a rank-three hidden-state tensor")
+    hidden = decoder_hidden_states(output)
+    if not isinstance(hidden, torch.Tensor) or hidden.shape != inputs[0].shape:
+        raise TypeError("Reference decoder must return hidden states, directly or as tuple element zero")
+    contract = {"module": type(module).__name__, "output_container": type(output).__name__,
+                "tuple_length": len(output) if isinstance(output, tuple) else None,
+                "hidden_shape": list(hidden.shape)}
+    return inputs[0].detach(), hidden.detach(), contract
+
+
+def require_complete_native_call(token_ids):
+    if not token_ids or token_ids[-1] != 50:
+        raise AssertionError("Complete native generation did not reach the function-response boundary")
+
+
 def official_model(runtime):
     import torch
     from torch import nn
@@ -130,13 +160,103 @@ def custom_logits(runtime, tokens, *, count=1, cache=None, offset=0):
     return runtime._logits(hidden[:, -count:]), next_cache
 
 
-def reference_logits(runtime, reference, tokens, *, count=1, cache=None, use_cache=False):
+def reference_policy_record(name):
+    if name not in REFERENCE_POLICIES:
+        raise ValueError(f"Unknown reference execution policy: {name}")
+    return dict(REFERENCE_POLICIES[name])
+
+
+def reference_hidden_states(runtime, reference, tokens, *, count=1, cache=None, use_cache=False,
+                            reference_policy="auto", check_time=None):
     import torch
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    from transformers.cache_utils import DynamicCache
+
+    policy = reference_policy_record(reference_policy)
+    if not tokens or type(count) is not int or count <= 0:
+        raise ValueError("Reference execution requires tokens and a positive output count")
+    if check_time is not None:
+        check_time()
+    ids = torch.tensor([tokens], device=runtime.device)
+    if reference_policy == "auto":
+        output = reference(input_ids=ids, past_key_values=cache, use_cache=use_cache)
+        return output.last_hidden_state[:, -count:], output.past_key_values
+    if reference.training or getattr(reference.config, "use_bidirectional_attention", False):
+        raise ValueError("Chunked reference execution requires an evaluated causal Gemma3 model")
+    if cache is not None and (not use_cache or not isinstance(cache, DynamicCache)):
+        raise TypeError("Chunked reference continuation requires the official DynamicCache and use_cache=True")
+    chunk_tokens = policy["chunk_tokens"]
+    internal_cache = use_cache or len(tokens) > chunk_tokens
+    start = 0 if cache is None else cache.get_seq_length()
+    tail = None
+    for first in range(0, len(tokens), chunk_tokens):
+        if check_time is not None:
+            check_time()
+        with sdpa_kernel(SDPBackend.MATH):
+            output = reference(input_ids=ids[:, first:first + chunk_tokens],
+                               past_key_values=cache, use_cache=internal_cache)
+        hidden = output.last_hidden_state[:, -count:]
+        tail = hidden if tail is None else torch.cat((tail, hidden), dim=1)[:, -count:]
+        if internal_cache:
+            cache = output.past_key_values
+            if not isinstance(cache, DynamicCache):
+                raise TypeError("The pinned reference did not return the official DynamicCache")
+            if cache.get_seq_length() != start + min(first + chunk_tokens, len(tokens)):
+                raise AssertionError("Official reference cache did not retain the complete token position")
+    return tail, cache if use_cache else None
+
+
+def reference_logits(runtime, reference, tokens, *, count=1, cache=None, use_cache=False,
+                     reference_policy="auto", check_time=None):
     from torch.nn import functional as F
     import model
-    output = reference(input_ids=torch.tensor([tokens], device=runtime.device),
-                       past_key_values=cache, use_cache=use_cache)
-    return F.linear(output.last_hidden_state[:, -count:], runtime.base[model.EMBEDDING]), output.past_key_values
+    hidden, cache = reference_hidden_states(runtime, reference, tokens, count=count, cache=cache,
+                                            use_cache=use_cache, reference_policy=reference_policy,
+                                            check_time=check_time)
+    return F.linear(hidden, runtime.base[model.EMBEDDING]), cache
+
+
+def validate_chunked_reference(runtime, reference, tokens, checks, check_time):
+    import torch
+    from torch.nn import functional as F
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    import model
+
+    if len(tokens) < 1028:
+        raise ValueError("Chunked-reference controls require at least 1028 frozen probe tokens")
+    weight = runtime.base[model.EMBEDDING]
+
+    def check_logits(actual, expected, label):
+        check_time()
+        record = compare_tensor(F.linear(actual, weight), F.linear(expected, weight), "logits", label)
+        checks.append(record)
+        if not record["argmax_agreement"]:
+            raise AssertionError(f"Chunked and dense MATH greedy tokens differ: {label}")
+
+    with torch.no_grad():
+        for length in (17, 511, 512, 513, 1025):
+            check_time()
+            with sdpa_kernel(SDPBackend.MATH):
+                dense, dense_cache = reference_hidden_states(runtime, reference, tokens[:length],
+                                                              count=length, use_cache=True, check_time=check_time)
+            chunked, chunked_cache = reference_hidden_states(
+                runtime, reference, tokens[:length], count=length, use_cache=True,
+                reference_policy="math-chunked-v1", check_time=check_time)
+            for first in range(0, length, 128):
+                check_logits(chunked[:, first:first + 128], dense[:, first:first + 128],
+                             f"reference-chunked-dense-{length}-positions-{first}:{min(first + 128, length)}")
+            following = tokens[length:length + 3]
+            with sdpa_kernel(SDPBackend.MATH):
+                dense_next, _ = reference_hidden_states(runtime, reference, following, count=3,
+                                                        cache=dense_cache, use_cache=True, check_time=check_time)
+                plain_next, _ = reference_hidden_states(runtime, reference, tokens[:length + 3],
+                                                        count=3, check_time=check_time)
+            chunked_next, _ = reference_hidden_states(
+                runtime, reference, following, count=3, cache=chunked_cache, use_cache=True,
+                reference_policy="math-chunked-v1", check_time=check_time)
+            check_logits(chunked_next, dense_next, f"reference-chunked-dense-cache-offset-{length}")
+            check_logits(dense_next, plain_next, f"reference-dense-cache-uncached-offset-{length}")
+            print(f"Reference policy control {length}: all positions and three continuation tokens agree", flush=True)
 
 
 def selected_probes(path):
@@ -281,7 +401,7 @@ def diagnose(assets, checkpoint, directory, deadline, budget):
             captured = []
 
             def capture_layer(module, inputs, output):
-                captured.append((inputs[0].detach(), output.detach()))
+                captured.append(decoder_layer_record(module, inputs, output))
 
             handles = [layer.register_forward_hook(capture_layer) for layer in reference.layers]
             try:
@@ -291,8 +411,9 @@ def diagnose(assets, checkpoint, directory, deadline, budget):
                     handle.remove()
             if len(captured) != model.LAYERS:
                 raise ValueError("Reference layer trace is incomplete")
+            report["decoder_output_contracts"] = [value[2] for value in captured]
             hidden = runtime._embed(first[:513])
-            for index, (reference_input, reference_output) in enumerate(captured):
+            for index, (reference_input, reference_output, _) in enumerate(captured):
                 check_time()
                 hidden = runtime._layer(hidden, index)
                 isolated = runtime._layer(reference_input, index)
@@ -327,8 +448,16 @@ def diagnose(assets, checkpoint, directory, deadline, budget):
         publish_json(report_path, report)
     for kind in ("propagated", "same_input"):
         first_bad = next((row for row in report["layers"] if not row[kind]["within_tolerance"]), None)
-        print(f"First divergent layer ({kind}): " + ("none in completed checks" if first_bad is None else
-              f"{first_bad['layer']}; max_abs={first_bad[kind]['maximum_absolute_error']}"), flush=True)
+        measured = len(report["layers"])
+        if first_bad is None:
+            result = f"none among {measured}/{model.LAYERS} measured layers" if measured else "not measured"
+        else:
+            attention = "sliding" if first_bad["local"] else "global"
+            result = (f"{first_bad['layer']} ({attention}); max_abs={first_bad[kind]['maximum_absolute_error']} "
+                      f"mismatches={first_bad[kind]['mismatch_count']}")
+        print(f"First divergent layer ({kind}): {result}", flush=True)
+    for row in report.get("rope", []):
+        print(f"RoPE {row['label']}: max_abs={row['maximum_absolute_error']}", flush=True)
     for row in report["cached"]:
         delta, plain = row["custom_vs_reference"], row["custom_vs_uncached"]
         print(f"Cache {row['length']}: reference_max={delta['maximum_absolute_error']} "
@@ -339,7 +468,7 @@ def diagnose(assets, checkpoint, directory, deadline, budget):
     return report
 
 
-def verify(assets, checkpoint, directory, deadline, budget):
+def verify(assets, checkpoint, directory, deadline, budget, *, reference_policy="auto"):
     import torch
     from torch.nn import functional as F
     from tokenizers import Tokenizer
@@ -347,6 +476,7 @@ def verify(assets, checkpoint, directory, deadline, budget):
 
     if version("transformers") != REFERENCE_VERSION:
         raise RuntimeError(f"Parity requires transformers=={REFERENCE_VERSION}")
+    policy = reference_policy_record(reference_policy)
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     receipt_path = directory / "parity.json"
@@ -357,7 +487,7 @@ def verify(assets, checkpoint, directory, deadline, budget):
                "native_template": file_record(path_for(assets, "history_template")),
                "implementation": file_record(Path(__file__)),
                "runtime": file_record(Path(model.__file__)), "reference_version": REFERENCE_VERSION,
-               "tolerances": TOLERANCES}
+               "reference_policy": policy, "tolerances": TOLERANCES}
     if receipt_path.exists():
         old = json.loads(receipt_path.read_text())
         if old.get("binding") != binding or old.get("passed") is not True:
@@ -392,18 +522,25 @@ def verify(assets, checkpoint, directory, deadline, budget):
         runtime = model.Runtime(path_for(assets, "base"), Path(checkpoint), expected_batch_size=4)
         reference, adapters = official_model(runtime)
         first = probes[0]["input_ids"]
+
+        def official_logits(tokens, **kwargs):
+            return reference_logits(runtime, reference, tokens, reference_policy=reference_policy,
+                                    check_time=check_time, **kwargs)
+
+        if reference_policy == "math-chunked-v1":
+            validate_chunked_reference(runtime, reference, first, checks, check_time)
         with torch.no_grad():
             for length in (17, 511, 512, 513, 1025):
                 check_time()
                 tokens = first[:length]
                 actual, _ = custom_logits(runtime, tokens, count=3)
-                expected, _ = reference_logits(runtime, reference, tokens, count=3)
+                expected, _ = official_logits(tokens, count=3)
                 checks.append(compare_tensor(actual, expected, "logits", f"boundary-{length}"))
             for row in probes:
                 check_time()
                 tokens = row["input_ids"][:row["prompt_tokens"]]
                 actual, _ = custom_logits(runtime, tokens)
-                expected, _ = reference_logits(runtime, reference, tokens)
+                expected, _ = official_logits(tokens)
                 checks.append(compare_tensor(actual, expected, "logits", f"complete-prompt:{row['case_id']}"))
                 if actual.argmax(-1).item() != expected.argmax(-1).item():
                     raise AssertionError("Reference and runtime disagree on complete-prompt greedy token")
@@ -414,8 +551,8 @@ def verify(assets, checkpoint, directory, deadline, budget):
             for index in range(8):
                 check_time()
                 actual, custom_cache = custom_logits(runtime, current, cache=custom_cache, offset=offset)
-                expected, ref_cache = reference_logits(runtime, reference, current, cache=ref_cache, use_cache=True)
-                uncached, _ = reference_logits(runtime, reference, tokens + custom_generated)
+                expected, ref_cache = official_logits(current, cache=ref_cache, use_cache=True)
+                uncached, _ = official_logits(tokens + custom_generated)
                 plain, _ = custom_logits(runtime, tokens + custom_generated)
                 checks.append(compare_tensor(actual, expected, "logits", f"cached-reference-{index}"))
                 checks.append(compare_tensor(actual, plain, "logits", f"custom-cache-{index}"))
@@ -434,7 +571,7 @@ def verify(assets, checkpoint, directory, deadline, budget):
             for index in range(512):
                 check_time()
                 actual, custom_cache = custom_logits(runtime, current, cache=custom_cache, offset=offset)
-                expected, ref_cache = reference_logits(runtime, reference, current, cache=ref_cache, use_cache=True)
+                expected, ref_cache = official_logits(current, cache=ref_cache, use_cache=True)
                 a, b = actual.argmax(-1).item(), expected.argmax(-1).item()
                 if a != b:
                     raise AssertionError(f"Complete native generation differs at token {index}")
@@ -443,11 +580,12 @@ def verify(assets, checkpoint, directory, deadline, budget):
                     break
                 offset += len(current)
                 current = [a]
+        require_complete_native_call(complete_call)
         check_time()
         prompt, completion = first[:17], first[17:20]
         actual_loss = runtime._loss_sum(prompt, completion) / len(completion)
         actual_loss.backward()
-        expected_logits, _ = reference_logits(runtime, reference, prompt + completion[:-1], count=len(completion))
+        expected_logits, _ = official_logits(prompt + completion[:-1], count=len(completion))
         expected_loss = F.cross_entropy(expected_logits[0], torch.tensor(completion, device=runtime.device))
         expected_loss.backward()
         checks.append(compare_tensor(actual_loss, expected_loss, "loss", "supervised-target-loss"))

@@ -26,6 +26,8 @@ MAX_UPDATES = 3246
 MAX_SECONDS = 36 * 3600
 RESERVE = 512 * 1024 ** 2
 EVALUATION_BYTES = 192 * 1024 ** 2
+REFERENCE_REVISION = "math-reference-v1"
+REFERENCE_POLICY = "math-chunked-v1"
 
 
 class BudgetLimit(RuntimeError):
@@ -563,9 +565,9 @@ def validate_score(score, observations, config, *, known=False):
 
 
 class Stages:
-    def __init__(self, directory, binding, budget, *, verify=lambda: None):
+    def __init__(self, directory, binding, budget, *, verify=lambda: None, phase_prefix=""):
         self.directory, self.binding, self.budget = directory, binding, budget
-        self.verify = verify
+        self.verify, self.phase_prefix = verify, phase_prefix
         (directory / "stages").mkdir(exist_ok=True)
 
     def run(self, name, action, validate=lambda value: None):
@@ -577,7 +579,7 @@ class Stages:
                 raise ValueError(f"Stage belongs to another experiment: {name}")
             validate(record["result"])
             return record["result"]
-        with self.budget.phase(name) as deadline:
+        with self.budget.phase(self.phase_prefix + name) as deadline:
             result = action(deadline)
             validate(result)
         self.budget.check()
@@ -920,6 +922,135 @@ def diagnose_parity(args, runner):
         return result
 
 
+def diagnostic_evidence(directory, parent, account, failures, parity):
+    expected_failure_records = [file_record(path, relative_to=ROOT) for path, _ in failures]
+    parent_record = file_record(directory / "experiment.json", relative_to=ROOT)
+    parent_binding = digest(parent)
+    def basename(record):
+        return dict(record, path=Path(record["path"]).name)
+    def finite_comparison(value, *, passed):
+        return (value.get("within_tolerance") is passed and value.get("nonfinite_count") == 0
+                and type(value.get("mismatch_count")) is int
+                and (value["mismatch_count"] == 0 if passed else value["mismatch_count"] > 0)
+                and isinstance(value.get("maximum_absolute_error"), (int, float))
+                and math.isfinite(value["maximum_absolute_error"])
+                and all(value.get(key) == tolerance for key, tolerance in parity.TOLERANCES["logits"].items()))
+    for path in sorted((directory / "diagnostics").glob("*/diagnostic-*.json"), reverse=True):
+        path = contained(path, directory)
+        try:
+            report, context = read(path), read(path.parent / "context.json")
+            after = read(path.parent / "budget-after.json")
+            code = {record["path"]: record for record in context["diagnostic_code"]["files"]}
+            expected = {name: basename(parent["assets"][key]) for name, key in (
+                ("checkpoint", "initial_checkpoint"), ("base", "base"), ("probes", "history_replay"))}
+            expected.update(implementation=basename(code["history_parity.py"]), runtime=basename(code["model.py"]))
+            before = context["budget_before"]
+            if (context.get("experiment_identity_sha256") != parent_binding
+                    or context.get("original_manifest") != parent_record
+                    or context.get("original_failures") != expected_failure_records
+                    or context.get("runtime") != parent["runtime"] or context.get("training_allowed") is not False
+                    or report.get("diagnostic_only") is not True or report.get("training_performed") is not False
+                    or report.get("status") not in ("DIAGNOSTIC_COMPLETE", "DIAGNOSTIC_INCOMPLETE")
+                    or report.get("tolerances") != parity.TOLERANCES
+                    or report.get("binding") != expected
+                    or any(report.get("environment", {}).get(key) != parent["runtime"][key]
+                           for key in ("python", "torch", "cuda"))
+                    or report.get("environment", {}).get("transformers") != parity.REFERENCE_VERSION):
+                continue
+            if any(value.get("identity_sha256") != parent_binding or value.get("charged_updates") != 0
+                   or value.get("maximum_seconds") != account["maximum_seconds"]
+                   or value.get("maximum_updates") != MAX_UPDATES for value in (before, after)):
+                continue
+            if not 0 <= before["elapsed_seconds"] <= after["elapsed_seconds"] <= account["elapsed_seconds"]:
+                continue
+            boundaries = report.get("boundaries", [])
+            if len(boundaries) != 4 or {row["length"] for row in boundaries} != {511, 512, 513, 514}:
+                continue
+            if not all(row["mask"].get("exact_equal") is True and row["mask"].get("mismatch_count") == 0
+                       and row["mask"].get("last_query_key_count") == min(row["length"], 512)
+                       and finite_comparison(row["custom_vs_math"], passed=True)
+                       and row["custom_vs_math"].get("argmax_agreement") is True
+                       and finite_comparison(row["custom_vs_default"], passed=row["length"] != 513)
+                       and finite_comparison(row["default_vs_math"], passed=row["length"] != 513)
+                       for row in boundaries):
+                continue
+            return {"report": file_record(path, relative_to=ROOT),
+                    "context": file_record(contained(path.parent / "context.json", directory), relative_to=ROOT),
+                    "budget_after": file_record(contained(path.parent / "budget-after.json", directory), relative_to=ROOT)}
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    raise ValueError("Repair requires stored, bound four-boundary diagnostics showing finite MATH agreement and the 513 automatic-dispatch mismatch")
+
+
+def reference_revision(args, runner, current, parity):
+    if args.hours is not None:
+        raise ValueError("A parity repair retains the original budget; --hours cannot reset or change it")
+    parent_directory = contained(args.runs / args.run_id, args.runs)
+    directory = contained(parent_directory / "revisions" / REFERENCE_REVISION, parent_directory)
+    parent = read(parent_directory / "experiment.json")
+    account = read(parent_directory / "budget.json")
+    parent_binding = digest(parent)
+    if (account.get("identity_sha256") != parent_binding or account.get("maximum_updates") != MAX_UPDATES
+            or not isinstance(account.get("maximum_seconds"), (int, float))
+            or not 0 < account["maximum_seconds"] <= MAX_SECONDS
+            or not isinstance(account.get("elapsed_seconds"), (int, float))
+            or not math.isfinite(account["elapsed_seconds"]) or account["elapsed_seconds"] < 0
+            or type(account.get("charged_updates")) is not int or not 0 <= account["charged_updates"] <= MAX_UPDATES
+            or not isinstance(account.get("stages"), list)):
+        raise ValueError("The original experiment budget must remain intact for the repair")
+    for key in ("config", "original", "assets", "origin", "runtime"):
+        if current[key] != parent[key]:
+            raise ValueError(f"Parity repair cannot change the original {key}")
+    path = directory / "experiment.json"
+    if path.exists():
+        revision = read(path)["revision"]
+    else:
+        _, checked_parent, _, _, _, failures = diagnostic_context(args, runner)
+        if checked_parent != parent:
+            raise ValueError("Original experiment changed while validating the repair")
+        for _, failure in failures:
+            if (failure["binding"].get("reference_version") != parity.REFERENCE_VERSION
+                    or failure["binding"].get("tolerances") != parity.TOLERANCES):
+                raise ValueError("Parity repair must preserve the original reference version and tolerances")
+        evidence = diagnostic_evidence(parent_directory, parent, account, failures, parity)
+        revision = {"id": REFERENCE_REVISION, "reference_policy": REFERENCE_POLICY,
+                    "parent_identity_sha256": parent_binding,
+                    "parent_manifest": file_record(parent_directory / "experiment.json", relative_to=ROOT),
+                    "failures": [file_record(failure, relative_to=ROOT) for failure, _ in failures],
+                    "diagnostic_evidence": evidence,
+                    "shared_budget": {"path": str((parent_directory / "budget.json").relative_to(ROOT)),
+                                      "identity_sha256": parent_binding,
+                                      "maximum_seconds": account["maximum_seconds"], "maximum_updates": MAX_UPDATES},
+                    "budget_at_revision": account,
+                    "reason": "Diagnose reference SDPA dispatch using bounded official MATH; full strict parity still required"}
+        if directory.exists() and any(directory.iterdir()):
+            raise ValueError("The revision directory contains unbound files; it will not be reused")
+        directory.mkdir(parents=True, exist_ok=True)
+    expected_budget = {"path": str((parent_directory / "budget.json").relative_to(ROOT)),
+                       "identity_sha256": parent_binding, "maximum_seconds": account["maximum_seconds"],
+                       "maximum_updates": MAX_UPDATES}
+    if (revision.get("id") != REFERENCE_REVISION or revision.get("reference_policy") != REFERENCE_POLICY
+            or revision.get("parent_identity_sha256") != parent_binding
+            or revision.get("shared_budget") != expected_budget):
+        raise ValueError("The frozen reference revision or shared budget binding changed")
+    snapshot = revision["budget_at_revision"]
+    if (account["elapsed_seconds"] < snapshot["elapsed_seconds"]
+            or account["charged_updates"] < snapshot["charged_updates"]
+            or account["stages"][:len(snapshot["stages"])] != snapshot["stages"]):
+        raise ValueError("The original budget was rolled back; the repair cannot reset spent work")
+    records = [revision["parent_manifest"], *revision["failures"], *revision["diagnostic_evidence"].values()]
+    for record in records:
+        if file_record(contained(ROOT / record["path"], parent_directory), relative_to=ROOT) != record:
+            raise ValueError(f"Original repair evidence changed: {record['path']}")
+    manifest = dict(current, revision=revision)
+    immutable(path, manifest)
+    worker_args = SimpleNamespace(**vars(args))
+    worker_args.run_id = f"{args.run_id}-{REFERENCE_REVISION}"
+    if len(f"{worker_args.run_id}-treatment-2718") > 100:
+        raise ValueError("The run ID is too long for the explicit revision checkpoint names")
+    return directory, manifest, parent_directory / "budget.json", parent_binding, account["maximum_seconds"] / 3600, worker_args
+
+
 def compare(args, runner):
     import history_parity
     import history_prepare
@@ -936,19 +1067,31 @@ def compare(args, runner):
         assets["initial_checkpoint"] = (initial, file_record(initial, relative_to=ROOT))
         hardware = runner.four_gpu_identity()
         directory = contained(args.runs / args.run_id, args.runs)
-        if directory.exists() and any(directory.iterdir()) and not (directory / "experiment.json").is_file():
-            raise ValueError("The output directory already belongs to another run; it will not be changed")
-        directory.mkdir(exist_ok=True)
+        repair = getattr(args, "repair_parity", False)
+        if not repair:
+            if directory.exists() and any(directory.iterdir()) and not (directory / "experiment.json").is_file():
+                raise ValueError("The output directory already belongs to another run; it will not be changed")
+            directory.mkdir(exist_ok=True)
         code_paths = ["run.py", "history.py", "history_prepare.py", "history_parity.py", "model.py", "ledger.py", "private_runtime.py", "cluster", "experiments.json",
                       "evaluate-actual.mjs", "evaluate-known.mjs", "evaluate.mjs", "experiments-history.json", "requirements.txt"]
         code_paths.extend(str(path.relative_to(ROOT)) for path in sorted((ROOT / "evaluation").rglob("*.mjs")))
         code_paths.extend(config.get("code_files", []))
         manifest = {"config": config, "original": original, "assets": {key: value[1] for key, value in assets.items()}, "origin": receipt,
                     "runtime": hardware, "code": code_record(ROOT, sorted(set(code_paths)))}
+        budget_path, budget_binding = directory / "budget.json", digest(manifest)
+        budget_hours, worker_args = 36 if args.hours is None else args.hours, args
+        if repair:
+            directory, manifest, budget_path, budget_binding, budget_hours, worker_args = reference_revision(
+                args, runner, manifest, history_parity)
+            print(f"Reference revision {REFERENCE_REVISION}; original shared budget retained; full strict parity required.", flush=True)
         immutable(directory / "experiment.json", manifest)
         binding = digest(manifest)
         def verify_inputs():
-            for record in list(manifest["assets"].values()) + manifest["code"]["files"]:
+            records = list(manifest["assets"].values()) + manifest["code"]["files"]
+            if repair:
+                revision = manifest["revision"]
+                records += [revision["parent_manifest"], *revision["failures"], *revision["diagnostic_evidence"].values()]
+            for record in records:
                 if file_record(contained(ROOT / record["path"]), relative_to=ROOT) != record:
                     raise ValueError(f"Frozen experiment input changed: {record['path']}")
         final = directory / "result.json"
@@ -969,8 +1112,9 @@ def compare(args, runner):
                     raise ValueError("Closed evaluation timing differs from its measured receipts")
             print_summary(result, final)
             return result
-        budget = Budget(directory / "budget.json", binding, 36 if args.hours is None else args.hours)
-        stages = Stages(directory, binding, budget, verify=verify_inputs)
+        budget = Budget(budget_path, budget_binding, budget_hours)
+        stages = Stages(directory, binding, budget, verify=verify_inputs,
+                        phase_prefix=f"{REFERENCE_REVISION}/" if repair else "")
         runner.require_run_space(args.runs, EVALUATION_BYTES + 512 * 1024 ** 2)
         hook_assets["train"] = hook_assets["history_replay"]
         parity_dir = directory / "parity"
@@ -979,14 +1123,15 @@ def compare(args, runner):
             if value.get("passed") is not True:
                 raise RuntimeError("Independent official-runtime parity did not pass; training is blocked")
         try:
+            parity_options = {"reference_policy": REFERENCE_POLICY} if repair else {}
             stages.run("official-parity", lambda deadline: history_parity.verify(
-                hook_assets, initial, parity_dir, deadline, budget), verify_parity)
+                hook_assets, initial, parity_dir, deadline, budget, **parity_options), verify_parity)
             collection = directory / "collection"
             collection.mkdir(exist_ok=True)
             prepared = stages.run("prepare", lambda deadline: history_prepare.prepare(
                 config, hook_assets, collection, initial, deadline, budget),
                 lambda value: validate_prepared(value, directory, runner))
-            backend = ClusterBackend(runner, args, config, original, assets, directory, receipt, hardware, budget, stages)
+            backend = ClusterBackend(runner, worker_args, config, original, assets, directory, receipt, hardware, budget, stages)
             backend.prepared(prepared)
             result = orchestrate(backend, stages, budget, initial)
         except (BudgetLimit, runner.BudgetExhausted) as error:
@@ -996,6 +1141,8 @@ def compare(args, runner):
                       "pairs": [read(path) for path in sorted(directory.glob("comparison-*.json"))],
                       "product_acceptance": False, "selection": None}
         result.update(identity_sha256=binding, budget=budget.account["record"], TEST_opened=False)
+        if repair:
+            result["shared_budget"] = manifest["revision"]["shared_budget"]
         publish_json(final, result)
         print_summary(result, final)
         return result
