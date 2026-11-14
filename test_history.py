@@ -8,6 +8,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 import sys
 import struct
+import subprocess
 from types import ModuleType, SimpleNamespace
 from tempfile import TemporaryDirectory
 import unittest
@@ -321,12 +322,14 @@ class SourceTests(unittest.TestCase):
 
 class PanelContractTests(unittest.TestCase):
     def test_real_frozen_panel_schema_and_all_planned_denominators(self):
-        panel_root = REPO.parents[1] / 'data/corpus/revisions/actual-history-v3/dev'
-        bundle_path = panel_root / 'actual-history-v3-dev.json'
-        bundle = h.read(bundle_path)
-        gold = h.read(panel_root / 'gold-replay.json')
         config = h.read(REPO / 'experiments-history.json')
-        config['assets'] = {'history_dev': {'path': bundle_path.name}}
+        bundle_path = REPO / config['assets']['history_dev']['path']
+        bundle = h.read(bundle_path)
+        replay = subprocess.run(
+            ['node', str(REPO / 'evaluate-actual.mjs'), str(REPO / 'assets/registry.json'),
+             str(bundle_path), '--selftest'], check=True, capture_output=True, text=True, timeout=180)
+        gold = json.loads(replay.stdout)
+        self.assertEqual(gold['cases'], 1250)
         rows = []
         for panel in ('fixed_prefix', 'closed_loop', 'challenge'):
             for authored in bundle['panels'][panel]:
@@ -336,7 +339,7 @@ class PanelContractTests(unittest.TestCase):
                            reference_success=True if row['reference_eligible'] else None)
                 rows.append(row)
         score = {'summary': gold['panels']['closed_loop'], 'panels': gold['panels'], 'observed_records': len(rows)}
-        with TemporaryDirectory() as temporary, patch.object(h, 'ROOT', panel_root):
+        with TemporaryDirectory() as temporary:
             path = Path(temporary) / 'observations.jsonl'
             path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
             h.validate_score(score, path, config)
