@@ -1,0 +1,393 @@
+{
+  "source_sha256": "024d21fba1d2fe73dc9f8d795552303acaeb099675d9d78df179c082c7e7afcb",
+  "functions": [
+    {
+      "function": "explain_purpose",
+      "case_id": "train-intent-0002"
+    },
+    {
+      "function": "explain_code_usage",
+      "case_id": "train-intent-0001"
+    },
+    {
+      "function": "get_default_value",
+      "case_id": "train-intent-0005"
+    },
+    {
+      "function": "explain_change_effect",
+      "case_id": "train-intent-0175"
+    },
+    {
+      "function": "explain_boolean_effect",
+      "case_id": "train-intent-0223"
+    },
+    {
+      "function": "explain_flag_literal_effect",
+      "case_id": "train-intent-0219"
+    },
+    {
+      "function": "get_units",
+      "case_id": "train-intent-0245"
+    },
+    {
+      "function": "get_custom_component_units",
+      "case_id": "train-intent-0255"
+    },
+    {
+      "function": "explain_case_sensitivity",
+      "case_id": "train-intent-0257"
+    },
+    {
+      "function": "compare_parameters",
+      "case_id": "train-intent-0274"
+    },
+    {
+      "function": "explain_conditional_applicability",
+      "case_id": "train-intent-0282"
+    },
+    {
+      "function": "explain_sigma_default_applicability",
+      "case_id": "train-intent-0296"
+    },
+    {
+      "function": "get_value_guidance",
+      "case_id": "train-intent-0298"
+    },
+    {
+      "function": "get_enable_guidance",
+      "case_id": "train-intent-0349"
+    },
+    {
+      "function": "get_allowed_values",
+      "case_id": "train-intent-0363"
+    },
+    {
+      "function": "explain_value_form_acceptance",
+      "case_id": "train-intent-0369"
+    },
+    {
+      "function": "explain_item_count_limits",
+      "case_id": "train-intent-0371"
+    },
+    {
+      "function": "explain_value_acceptance",
+      "case_id": "train-intent-0373"
+    },
+    {
+      "function": "explain_default_rationale",
+      "case_id": "train-intent-0376"
+    },
+    {
+      "function": "explain_grid_density_guidance",
+      "case_id": "train-intent-0383"
+    },
+    {
+      "function": "explain_value_relation",
+      "case_id": "train-intent-0384"
+    },
+    {
+      "function": "describe_path_target",
+      "case_id": "train-intent-0385"
+    },
+    {
+      "function": "explain_path_portability",
+      "case_id": "train-intent-0392"
+    },
+    {
+      "function": "explain_path_failure",
+      "case_id": "train-intent-0398"
+    },
+    {
+      "function": "explain_bids_search_path",
+      "case_id": "train-intent-0404"
+    },
+    {
+      "function": "explain_repeated_gpu_selection",
+      "case_id": "train-intent-0405"
+    },
+    {
+      "function": "explain_gpu_visibility_mapping",
+      "case_id": "train-intent-0406"
+    },
+    {
+      "function": "explain_hrf_sampling_relationship",
+      "case_id": "train-intent-0407"
+    },
+    {
+      "function": "explain_sigma_extent_relationship",
+      "case_id": "train-intent-0408"
+    },
+    {
+      "function": "explain_grid_axis_geometry",
+      "case_id": "train-intent-0409"
+    },
+    {
+      "function": "explain_discovery_filter_relationship",
+      "case_id": "train-intent-0413"
+    },
+    {
+      "function": "explain_parameter_ordering",
+      "case_id": "train-intent-0414"
+    },
+    {
+      "function": "explain_parameter_equality",
+      "case_id": "train-intent-0415"
+    },
+    {
+      "function": "explain_parameter_data_matching",
+      "case_id": "train-intent-0420"
+    },
+    {
+      "function": "explain_run_timepoint_equality",
+      "case_id": "train-intent-0425"
+    },
+    {
+      "function": "explain_stimulus_timepoint_matching",
+      "case_id": "train-intent-0426"
+    },
+    {
+      "function": "explain_measured_file_stimulus_requirement",
+      "case_id": "train-intent-0428"
+    },
+    {
+      "function": "explain_stimulus_file_reuse",
+      "case_id": "train-intent-0429"
+    },
+    {
+      "function": "compare_data_formats",
+      "case_id": "train-intent-0430"
+    },
+    {
+      "function": "compare_fitting_methods",
+      "case_id": "train-intent-0431"
+    },
+    {
+      "function": "compare_refinement_backend_results",
+      "case_id": "train-intent-0432"
+    },
+    {
+      "function": "compare_run_modes",
+      "case_id": "train-intent-0433"
+    },
+    {
+      "function": "explain_section_applicability",
+      "case_id": "train-intent-0434"
+    },
+    {
+      "function": "explain_execution_hardware_requirement",
+      "case_id": "train-intent-0435"
+    },
+    {
+      "function": "explain_hemisphere_filter_applicability",
+      "case_id": "train-intent-0436"
+    },
+    {
+      "function": "explain_required_temporal_settings",
+      "case_id": "train-intent-0437"
+    },
+    {
+      "function": "explain_default_component_applicability",
+      "case_id": "train-intent-0438"
+    },
+    {
+      "function": "explain_all_default_groups_applicability",
+      "case_id": "train-intent-0442"
+    },
+    {
+      "function": "explain_partial_custom_loading",
+      "case_id": "train-intent-0443"
+    },
+    {
+      "function": "explain_outside_stimulus_candidates",
+      "case_id": "train-intent-0444"
+    },
+    {
+      "function": "describe_parameter_result_location",
+      "case_id": "train-intent-0445"
+    },
+    {
+      "function": "describe_results_when_bids_enabled",
+      "case_id": "train-intent-0447"
+    },
+    {
+      "function": "describe_result_backup",
+      "case_id": "train-intent-0448"
+    },
+    {
+      "function": "describe_debug_output",
+      "case_id": "train-intent-0449"
+    },
+    {
+      "function": "get_configuration_location",
+      "case_id": "train-intent-0450"
+    },
+    {
+      "function": "explain_timing_correctness",
+      "case_id": "train-intent-0451"
+    },
+    {
+      "function": "explain_result_impact",
+      "case_id": "train-intent-0453"
+    },
+    {
+      "function": "explain_batch_count_relation",
+      "case_id": "train-intent-0458"
+    },
+    {
+      "function": "explain_gpu_id_requirement",
+      "case_id": "train-intent-0459"
+    },
+    {
+      "function": "explain_dataset_presence",
+      "case_id": "train-intent-0461"
+    },
+    {
+      "function": "explain_gpu_out_of_memory",
+      "case_id": "train-intent-0463"
+    },
+    {
+      "function": "explain_file_preservation",
+      "case_id": "train-intent-0464"
+    },
+    {
+      "function": "explain_unset_value",
+      "case_id": "train-intent-0465"
+    },
+    {
+      "function": "explain_multiple_items",
+      "case_id": "train-intent-0470"
+    },
+    {
+      "function": "explain_concatenation_variation",
+      "case_id": "train-intent-0479"
+    },
+    {
+      "function": "explain_resource_impact",
+      "case_id": "train-intent-0480"
+    },
+    {
+      "function": "explain_debug_overhead",
+      "case_id": "train-intent-0492"
+    },
+    {
+      "function": "interpret_parameter_literals",
+      "case_id": "train-intent-0493"
+    },
+    {
+      "function": "compare_label_literals",
+      "case_id": "train-intent-0500"
+    },
+    {
+      "function": "explain_extent_convention",
+      "case_id": "train-intent-0503"
+    },
+    {
+      "function": "explain_filename_format",
+      "case_id": "train-intent-0504"
+    },
+    {
+      "function": "explain_component_sampling",
+      "case_id": "train-intent-0507"
+    },
+    {
+      "function": "explain_sigma_spacing",
+      "case_id": "train-intent-0508"
+    },
+    {
+      "function": "explain_item_order",
+      "case_id": "train-intent-0509"
+    },
+    {
+      "function": "explain_stimulus_transformation",
+      "case_id": "train-intent-0511"
+    },
+    {
+      "function": "explain_multi_file_handling",
+      "case_id": "train-intent-0514"
+    },
+    {
+      "function": "explain_single_task_restriction",
+      "case_id": "train-intent-0516"
+    },
+    {
+      "function": "explain_result_directory",
+      "case_id": "train-intent-0517"
+    },
+    {
+      "function": "explain_stimulus_matching",
+      "case_id": "train-intent-0519"
+    },
+    {
+      "function": "explain_configuration_migration",
+      "case_id": "train-intent-0520"
+    },
+    {
+      "function": "explain_generator_editability",
+      "case_id": "train-intent-0521"
+    },
+    {
+      "function": "explain_character_requirements",
+      "case_id": "train-intent-0522"
+    },
+    {
+      "function": "get_file_requirements",
+      "case_id": "train-intent-0524"
+    },
+    {
+      "function": "explain_version_format",
+      "case_id": "train-intent-0530"
+    },
+    {
+      "function": "explain_identifier_lookup",
+      "case_id": "train-intent-0531"
+    },
+    {
+      "function": "explain_error_remedy",
+      "case_id": "train-intent-0535"
+    },
+    {
+      "function": "explain_hrf_normalization",
+      "case_id": "train-intent-0537"
+    },
+    {
+      "function": "explain_custom_file_creation",
+      "case_id": "train-intent-0538"
+    },
+    {
+      "function": "explain_installed_version_lookup",
+      "case_id": "train-intent-0539"
+    },
+    {
+      "function": "explain_old_configuration_source",
+      "case_id": "train-intent-0540"
+    },
+    {
+      "function": "get_component_shape",
+      "case_id": "train-intent-0541"
+    },
+    {
+      "function": "explain_hrf_shape_effect",
+      "case_id": "train-intent-0544"
+    },
+    {
+      "function": "explain_label_case_acceptance",
+      "case_id": "train-intent-0547"
+    },
+    {
+      "function": "explain_default_loading_under_xml_condition",
+      "case_id": "train-intent-0564"
+    },
+    {
+      "function": "explain_grid_density_under_xml_condition",
+      "case_id": "train-intent-0565"
+    },
+    {
+      "function": "explain_gpu_oom_under_xml_condition",
+      "case_id": "train-intent-0567"
+    },
+    {
+      "function": "explain_hrf_interval_change_effect",
+      "case_id": "train-hrf-context-0001"
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "status": "approved",
+  "reviewer": "independent DEV author / history_dev_author",
+  "author": "history_train_author",
+  "file_hashes": {
+    "collection-specs.jsonl": "beb6443c43aac3b47acec4a39ce31fcebe53d9aa0de47efbb471a17b899f89fc",
+    "corpus-candidate.jsonl": "4baaa86068d2017b8b0662c2961f2ce34c83f62f8a4726cd16e960dc25f7316a",
+    "matched-control-candidate.jsonl": "81974e599ee32b256318722e08acc0089d128592498682d3e5cfb7938da3245d"
+  },
+  "code_sha256": {
+    "work/actual-history-v3/train/build.mjs": "2224e650f6ba577bfd761d779fb7e14d44c890b704a171f3497802acdc284ed6",
+    "work/actual-history-v3/train/materialize.mjs": "016f148fe824ac8af8af8372f3e5abc173b91481c67ac19a51650b13c23adbeb",
+    "work/actual-history-v3/train/matched-control.mjs": "272023296b8c9052b0db66bc2a97eb65860132b228a467e6dcb055d626d07a74",
+    "work/actual-history-v3/train/bridge.mjs": "7a8f17fcd9ffaa4e1f603190b282292b89a2abf9470a1399c4301d5666c3da04"
+  },
+  "review_scope": {
+    "semantic": "Reviewed all 24 selected scientific anchor/clarification mappings and all eight family generators, target-position and correction templates, pending policies, original/corrected versions and branch rules. This is not a claim of 480 individually independent scientific facts or independent source re-verification.",
+    "mechanical": {
+      "schema": 1,
+      "reviewer": "history_dev_author_after_DEV_freeze",
+      "file_hashes": {
+        "collection-specs.jsonl": "beb6443c43aac3b47acec4a39ce31fcebe53d9aa0de47efbb471a17b899f89fc",
+        "corpus-candidate.jsonl": "4baaa86068d2017b8b0662c2961f2ce34c83f62f8a4726cd16e960dc25f7316a",
+        "matched-control-candidate.jsonl": "81974e599ee32b256318722e08acc0089d128592498682d3e5cfb7938da3245d"
+      },
+      "cases": 480,
+      "replay_verified": 480,
+      "matched_control_verified": 480,
+      "already_correct_branch_verified": 96,
+      "wrong_pending_branches_verified": 48,
+      "provider_failure_branches": 480,
+      "wrong_scientific_branches": 480,
+      "blockers": [],
+      "model_inference_performed": false
+    }
+  },
+  "additional_checks": {
+    "invalid_self_reference_error_after_reordering": "Independent explicit counterexample passed: an invalid first e1 self-reference would become valid under na\u00efve target-first movement; legal content-preserving control chose e1,e5,e2,e3,e4 and retained failure.",
+    "identity_pair_prompt": "Independent representative identity pair has byte-identical rendered prompt; author additionally verified all 162 identity pairs.",
+    "receipt_resume": "Source review confirms complete raw prefix replay, saved prompt hash recomputation and actual-session equality before resuming; no cluster failure recovery receipt is claimed."
+  },
+  "resolved_findings": [
+    {
+      "issue": "Actual answer already equals the requested replacement, causing invalid no-op _replace.",
+      "resolution": "Frozen addressed repeat_answer branch and remappable question; all 96 correction counterfactuals pass."
+    },
+    {
+      "issue": "Mismatch between intended pending semantics and actual pending was not explicit in fallback question.",
+      "resolution": "Frozen fallback asks user to identify intended request and preserves existing pending; 48 wrong-function counterfactuals pass."
+    },
+    {
+      "issue": "Control-only session_id suffix leaks treatment identity into prompt.",
+      "resolution": "Root finding fixed: same session_id on both sides; identity prompt exact."
+    },
+    {
+      "issue": "Reordering invalid-reference output can turn the original error into a valid answer.",
+      "resolution": "Root finding fixed: enumerate legal orders, require same outcomes/error types/displays/scientific args/pending, and preserve explicit identity fallback without discarding B."
+    }
+  ],
+  "remaining_limitations": [
+    "Initial A/B estimand was prospectively amended from literal old-TRAIN replay versus actual history to earliest-legal-order versus actual order with matched content/reference wording. This is not a pure provenance experiment.",
+    "Twenty-four scientific anchors recur across 192 declared scenario families; 360 prefix capture identities contain 336 distinct question sequences. Counts do not establish independence or exhaustive coverage.",
+    "Actual checkpoint7205 responses have not been collected locally. Frozen branch policies were stress-tested with 480 all-provider-error and 480 wrong-scientific-call histories, not all possible outputs.",
+    "Token balance, source7205 optimizer receipt, runtime parity, training and quality evaluation remain cluster gates. No model/tokenizer/GPU quality result is asserted.",
+    "Old scientific contracts and reviewed TRAIN anchors were reused; this review independently checks their use and dialogue semantics, not new scientific truth."
+  ],
+  "independence": {
+    "new_dev_questions_frozen_before_train_review": true,
+    "new_dev_changed_from_train_contents": false,
+    "candidate_model_output_seen": false,
+    "sealed_test_read": false,
+    "later_dev_equivalence_amendment": "Root-requested pre-run correction from the established symmetric rubric; did not use TRAIN contents."
+  },
+  "blockers": [],
+  "original_status": "APPROVED_FOR_FROZEN_CLUSTER_COLLECTION_AND_CONTROLLED_EXPERIMENT",
+  "specs_sha256": "beb6443c43aac3b47acec4a39ce31fcebe53d9aa0de47efbb471a17b899f89fc",
+  "original_review_sha256": "ce7a4b63315adeb42104a9521a0d107172aade3a7f0ca43a4fc830e1dd891f6b",
+  "deployed_code_sha256": {
+    "evaluation/history-train.mjs": "016f148fe824ac8af8af8372f3e5abc173b91481c67ac19a51650b13c23adbeb",
+    "evaluation/history-control.mjs": "7c8144f16199011eba9e582af1bd508ba47c1393ace988b49f5e24873929afcd",
+    "history-data.mjs": "d924e21351777ca7c6c249d9e2dbcb3096c28e7481e97e4d8498f56f714ce3b4"
+  },
+  "deployment_transformation": "Only module import paths change; reviewed source digests retained."
+}

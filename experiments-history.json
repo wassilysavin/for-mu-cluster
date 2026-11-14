@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "id": "actual-history-v3",
+  "initial_step": 7205,
+  "examples_per_update": 4,
+  "updates_per_arm": 786,
+  "midpoint": 393,
+  "seeds": [
+    1729,
+    2718
+  ],
+  "max_optimizer_updates": 3246,
+  "max_elapsed_hours": 36,
+  "assets": {
+    "history_replay": {
+      "path": "assets/train-full-v2.jsonl",
+      "sha256": "024d21fba1d2fe73dc9f8d795552303acaeb099675d9d78df179c082c7e7afcb"
+    },
+    "regression_dev": {
+      "path": "assets/dev-volume-v1.jsonl",
+      "sha256": "77450582e17c9c58656196047157227a58c0e8e42629c81cbe408337e9cd7e13"
+    },
+    "history_dev": {
+      "path": "assets/actual-history-v3-dev.json",
+      "sha256": "0d10adef947b5cee3d4dba9f661f9c9561d13833b88df4dc94fc493624854326"
+    },
+    "history_train_specs": {
+      "path": "assets/history-train-specs.jsonl",
+      "sha256": "beb6443c43aac3b47acec4a39ce31fcebe53d9aa0de47efbb471a17b899f89fc"
+    },
+    "history_train_manifest": {
+      "path": "assets/history-train-manifest.json",
+      "sha256": "1b96990abc1c302aded25c6f7e030bf81dc17ea0dfbf600d4e14c0b7ffb740f9"
+    },
+    "history_train_review": {
+      "path": "assets/history-train-review.json",
+      "sha256": "c1a426a723339c25bc6c56e962d3e1644775b16b71da81132f71b0168044eaa3"
+    },
+    "history_common_coverage": {
+      "path": "assets/history-common-coverage.json",
+      "sha256": "b0d805dc4d0d6ebcd39fcbc1aabe5badd20f42483c00089405f2f12ff7ced316"
+    },
+    "history_known_review": {
+      "path": "assets/history-known-review.json",
+      "sha256": "411978669af1ea7c40b96035856a240d21c2ab3fed4ec58e0a5cf6f2c51679dd"
+    },
+    "history_amendment": {
+      "path": "assets/history-amendment.json",
+      "sha256": "88309507e94e9300d897b7c6f02b4ab5d424fba9d2780bd3a2b7a22e800152a6"
+    },
+    "history_template": {
+      "path": "assets/chat_template.jinja",
+      "sha256": "0dbaf70819c970c9bacd7125be8e9db46b7bc0e6ed3bc303d92bd58fb9dd604a"
+    }
+  },
+  "code_files": [
+    "history-data.mjs",
+    "test_history.py"
+  ],
+  "evaluation": {
+    "id": "actual-history-v3-dev",
+    "fixed_prefix": 288,
+    "closed_loop": 898,
+    "challenge": 64,
+    "supported": 834,
+    "outside_scope": 64,
+    "dialogues": 128,
+    "standalone": 194,
+    "exact_reference": 252
+  },
+  "regression": {
+    "id": "dev-volume-v1",
+    "dialogue_version": 2,
+    "cases": 155,
+    "supported": 131,
+    "outside_scope": 24,
+    "dialogues": 16
+  },
+  "selection": "Frozen diagnostic gates, paired whole-family bootstrap, no unresolved PASS, no product acceptance. Second seed only after first-pair gates and admission.",
+  "prospective_amendment": {
+    "estimand": "Earliest legal content-preserving history order versus actual order, with matched reference wording. This is not literal old-TRAIN replay or a pure provenance experiment.",
+    "common_replay_fraction": 0.5,
+    "paired_history_fraction": 0.5,
+    "control": "Reconstruct each collected history into earliest legal content-preserving addressed-object order; retain declared identity pairs when necessary.",
+    "sizing": "Fixed authored panels and engineering count gates; no separate model-based sizing pilot or claim of statistically optimal sample size.",
+    "larger_reference_model": "Deferred optional diagnostic; not part of this run, not used as gold.",
+    "early_evaluation": "Known DEV155 at393 updates; fresh panels only at786.",
+    "quality_limit": "Unresolved semantic alternatives or infrastructure failure prohibit automatic promotion; no release acceptance."
+  }
+}

@@ -3,3 +3,5 @@ torch==2.7.1+cu118
 numpy==2.2.6
 safetensors==0.7.0
 tokenizers==0.22.2
+transformers==4.57.3
+huggingface-hub==0.36.2

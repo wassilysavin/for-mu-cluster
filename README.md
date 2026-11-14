@@ -1,17 +1,65 @@
 # GEM-pRF Functions cluster runs
 
-This repository contains frozen inputs and a runner for continuing FunctionGemma training from step 4847 on NVIDIA V100 GPUs. Every training course requires a successful FP32 pilot. The full course trains one model on four GPUs; the earlier volume experiment compares two datasets.
+This repository contains frozen experiment definitions and a runner for FunctionGemma training on NVIDIA V100 GPUs. The current actual-history comparison continues from the completed cluster checkpoint 7205. Earlier experiments and their inputs remain available. Every training course requires a successful FP32 pilot.
 
 | File or folder | Purpose |
 | --- | --- |
 | `experiments.json` | Architecture, training recipe, dataset identities and hashes, experiment IDs, and comparison criteria. |
 | `experiments-volume.json` | Frozen TRAIN volume comparison and fresh development suite. |
 | `experiments-full.json` | Full TRAIN course: batch four, three epochs, resource limits and checkpoint selection. |
+| `experiments-history.json` | Current actual-history comparison from checkpoint 7205, including fresh DEV and matched schedules. |
 | `run.py` | The entry point for training, evaluation, and reports. |
 | `model.py`, `ledger.py` | The PyTorch model and checkpoint code, and the run log. |
 | `evaluate.mjs`, `evaluation/` | Development scoring against actual conversation history. |
 | `assets/` | Base weights, tokenizer, starting checkpoint, frozen datasets, and evaluator contracts. |
 | `runs/` | Local results, checkpoints, and observations. Git ignores this folder. |
+
+## Current experiment: actual-history-v3
+
+This branch compares how the model learns to address actual dialogue history. It starts from your completed **7205 checkpoint and its optimizer**, already stored under `runs/full-train-v2-4gpu-full-course/`. It never substitutes the earlier 6419 selection or the bundled 4847 checkpoint.
+
+From this repository, inside your existing environment and tmux session:
+
+```sh
+git fetch origin
+git switch actual-history-v3
+git pull --ff-only
+git lfs pull
+python -m pip install -r requirements.txt
+python test_history.py
+python run.py --suite history check
+python -u run.py history --gpus 4
+```
+
+If you are already inside tmux, run the command there. Otherwise create a session with `tmux new -s gemprf-history` first. After a disconnect, reconnect using `tmux attach -t gemprf-history`. If the process stopped, repeat **the same** `python -u run.py history --gpus 4` command with this checkout unchanged. One repository lease prevents duplicate model jobs.
+
+The run performs these stages automatically:
+
+1. Verify the real 7205 weights, complete optimizer, original full-course receipts and frozen inputs. Compare the custom runtime with **Transformers 4.57.3 Gemma3**, using identical effective weights, tokenization and declared numerical tolerances. This is an offline reference check; no extra model download occurs. Numerical failure blocks training.
+2. Collect 360 TRAIN-only prefixes from 7205, requiring 1,452 generation requests before resumptions. Materialize 480 reviewed continuation policies across 192 scenario families and eight groups. Raw model replies remain in the histories; they never become supervised gold merely because the model generated them. Actual histories are collected here because the 7205 checkpoint is on your cluster.
+3. Freeze tokenized schedules. Every update contains two common old TRAIN examples and two history examples. Common replay covers all 97 domain functions. Both seeds use 3,144 presentations per arm (786 updates); prompt and supervised-token totals must each differ by at most 5%, without truncation or dropped cases.
+4. Run the four-GPU numerical pilot, evaluate the unchanged 7205 baseline, then train control A and treatment B **sequentially**, each using all four allocated GPUs. Evaluate known DEV155 at update 393 and the fresh panels after update 786. Evaluations and history collection use the primary GPU; training uses all four.
+5. Apply the frozen diagnostic gates. Run the second pair from the same 7205 with seed 2718 only if the first pair passes and the complete second pair fits the remaining budget. Unresolved semantic reviews or infrastructure failures prevent automatic promotion.
+
+**Prospective protocol amendment:** strict old-row matching was impossible for the new dialogue scenarios. Both variable halves therefore use the same collected content: A reconstructs the earliest legal, content-preserving target order; B retains the actual order. Address wording and native IDs are remapped together. Invalid-reference errors, conditions and pending requests must retain their meaning. If no earlier order preserves them, the identity pair is retained and counted. This tests the position/order training package, **not** pure history provenance or old-data-only continuation. The 50% common replay remains identical at the same positions. See `assets/history-amendment.json`.
+
+Fresh evaluation has separate denominators: 288 fixed-prefix cases; 898 closed-loop turns (834 supported, 64 outside scope, 128 whole dialogues, including 194 standalone questions covering 97 functions); and 64 additional turns in eight long dialogues. Complete answer plus state is primary. Whole-reply and answer-level quotations admit equivalent complete programs only for the same actual occurrence and scope. Repeated questions link whole scenario families into conservative bootstrap blocks. No fresh DEV output is used to author TRAIN. Sealed TEST is absent and remains closed.
+
+The entire experiment has a 36-hour model-worker budget and at most 3,246 charged optimizer updates, including pilots and repeated work after interrupted checkpoints. It preserves a 512 MiB free-disk reserve, verifies hashes on resume, keeps atomic checkpoints and records actual before/after states. Interrupted phase time is conservatively charged through recovery; the budget does not reset. The larger-model reference and a separate model-based sample-sizing study are deferred. Panel sizes are engineering choices, not a claim of statistical optimality.
+
+Files added for this experiment:
+
+| File | Purpose |
+|---|---|
+| `experiments-history.json` | Frozen assets, recipe, panel sizes and prospective amendments. |
+| `history.py` | Stage orchestration, budget, checkpoint provenance and paired decisions. |
+| `history_prepare.py`, `history-data.mjs` | TRAIN-only collection and matched schedule preparation. |
+| `history_parity.py` | Independent official-runtime numerical gate. |
+| `evaluate-actual.mjs`, `evaluate-known.mjs`, `evaluation/` | Actual-history evaluation and the reviewed old DEV rubric. |
+| `assets/history-*`, `assets/actual-history-v3-dev.json` | Readable scenario specifications, source hashes, review receipts and fresh DEV. |
+| `test_history.py` | CPU tests for interruptions, provenance, budgets and decisions. |
+
+Results stay under `runs/actual-history-v3-4gpu/`; individual training arms use sibling folders with that prefix. `result.json` contains the complete comparison, `comparison-1729.json` and optional `comparison-2718.json` preserve each pair, and `budget.json` records charged work. `collection/` retains the collected histories and immutable TRAIN, while evaluation folders retain raw generations and full semantic observations. The terminal prints a short summary and the report path. This selects diagnostic evidence, not a production-ready model.
 
 ## Set up once
 
@@ -30,7 +78,7 @@ python run.py check
 
 The repository attributes use Git LFS for weights and TRAIN. Use and distribution of the Gemma weights and derivatives are subject to the restrictions in section 3.2 of the bundled [Gemma Terms of Use](GEMMA-TERMS.md). The model changes are listed in [NOTICE](NOTICE).
 
-## Full TRAIN on four GPUs
+## Historical full TRAIN v2
 
 With earlier jobs stopped, use your existing environment and checkout:
 
@@ -73,7 +121,7 @@ python -u run.py full --gpus 4
 
 Detach with `Ctrl-B`, then `D`. Reconnect after logging in with `tmux attach -t gemprf-full`. Start the course only once; reconnect to its existing session to inspect progress.
 
-## Compare TRAIN volume
+## Historical TRAIN-volume comparison
 
 Use the `train-volume-v1` branch and keep the checkout fixed until both arms finish. Run these commands from the repository in your existing Python environment. Use the same `runs/` directory for all jobs sharing the GPU. From an empty run directory, the free-space check needs about 684 MiB for the first round or 782 MiB for both rounds, including a 512 MiB reserve. The runner checks space again when saving checkpoints and writing evaluation observations.
 

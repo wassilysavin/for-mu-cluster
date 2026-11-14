@@ -545,6 +545,15 @@ def train(args, identity, experiment, assets, schedule, *, until=None, lease_hel
             resources.callback(reference.close)
         if runtime.tokenizer_sha256 != assets["tokenizer"][1]["sha256"]:
             raise ValueError("Checkpoint tokenizer differs from the experiment")
+        fork_lineage = getattr(args, "fork_lineage", None)
+        if checkpoint == initial and fork_lineage is not None:
+            if runtime.lineage != fork_lineage or (reference is not None and reference.lineage != fork_lineage):
+                raise ValueError("The initial checkpoint does not have the verified parent lineage")
+            runtime.lineage = {}
+            if reference is not None:
+                reference.lineage = {}
+            run.event("checkpoint_forked", parent_lineage=fork_lineage,
+                      parent_sha256=assets["initial_checkpoint"][1]["sha256"])
         if checkpoint == latest and runtime.lineage != lineage:
             raise ValueError("The saved checkpoint belongs to another run")
         initial_step = identity["recipe"]["initial_step"]
@@ -1392,7 +1401,7 @@ def full_course(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=Path, default=ROOT / "runs", help="Shared run directory")
-    parser.add_argument("--suite", choices=("legacy", "volume", "full"), default="legacy")
+    parser.add_argument("--suite", choices=("legacy", "volume", "full", "history"), default="legacy")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check")
     commands.add_parser("report")
@@ -1410,6 +1419,11 @@ def main():
     full.add_argument("--gpus", type=int, choices=(4,), default=4)
     full.add_argument("--run-id", default="full-train-v2-4gpu")
     full.add_argument("--hours", type=float, help="Fixed elapsed budget, at most 36 hours including disconnects")
+    history = commands.add_parser("history", help="Compare frozen actual-history TRAIN arms from checkpoint 7205")
+    history.add_argument("--gpus", type=int, choices=(4,), default=4)
+    history.add_argument("--run-id", default="actual-history-v3-4gpu")
+    history.add_argument("--source-run-id", default="full-train-v2-4gpu")
+    history.add_argument("--hours", type=float, help="Frozen model-worker budget, at most 36 hours")
     training = commands.add_parser("train")
     evaluation = commands.add_parser("test")
     for command in (training, evaluation):
@@ -1422,7 +1436,14 @@ def main():
     if args.command == "report":
         print(json.dumps(report(args.runs), indent=2))
     elif args.command == "check":
-        check(args.suite)
+        if args.suite == "history":
+            import history
+            history.check(sys.modules[__name__])
+        else:
+            check(args.suite)
+    elif args.command == "history":
+        import history
+        history.compare(args, sys.modules[__name__])
     elif args.command == "full":
         full_course(args)
     elif args.command == "compare":

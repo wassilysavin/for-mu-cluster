@@ -1,0 +1,61 @@
+{
+  "status": "PROSPECTIVE_AMENDMENT_BEFORE_ANY_CANDIDATE_OBSERVATION",
+  "old_action_type_counts": {
+    "domain": 563,
+    "answer_quote": 115,
+    "correction": 165,
+    "pending_resolve": 71,
+    "answer_quote+domain": 26,
+    "pending_cancel": 6,
+    "answer_quote+pending_cancel": 6,
+    "domain+pending_cancel": 1,
+    "answer_quote+correction": 25,
+    "domain+pending_resolve": 5,
+    "answer_quote+pending_resolve": 5,
+    "domain+retry": 17,
+    "correction+domain": 1,
+    "exchange_quote": 12,
+    "reference_clarify": 12
+  },
+  "old_exchange_quote_case_ids": [
+    "train-volume-recovery-v2-01-repeat",
+    "train-volume-recovery-v2-02-repeat",
+    "train-volume-recovery-v2-03-repeat",
+    "train-volume-recovery-v2-04-repeat",
+    "train-volume-recovery-v2-05-repeat",
+    "train-volume-recovery-v2-06-repeat",
+    "train-volume-recovery-v2-07-repeat",
+    "train-volume-recovery-v2-08-repeat",
+    "train-volume-recovery-v2-09-repeat",
+    "train-volume-recovery-v2-10-repeat",
+    "train-volume-recovery-v2-11-repeat",
+    "train-volume-recovery-v2-12-repeat"
+  ],
+  "old_retry_domain_functions": [
+    "compare_data_formats",
+    "compare_parameters",
+    "describe_debug_output",
+    "explain_change_effect",
+    "explain_code_usage",
+    "explain_gpu_out_of_memory",
+    "explain_grid_density_guidance",
+    "explain_hrf_interval_change_effect",
+    "explain_purpose",
+    "explain_sigma_spacing",
+    "get_default_value",
+    "get_units",
+    "interpret_parameter_literals"
+  ],
+  "matching_obstacle": "The frozen old corpus has only12 whole-exchange quotations and17 retries and cannot supply every authored domain/action/condition/arity stratum. Its old quotations/retries address e1; this is the defect under test. Exact old-row matching is not asserted.",
+  "amendment": "Use reconstructed earliest-legal-order controls paired to each B history, preserving all displayed replies, actual scientific calls, conditions and continuation action/arity. Move addressed objects with dependency ancestors; preserve relative pending lifecycle actions. Rephrase every explicit prefix/current ordinal using frozen author address templates. Same observed content in both arms; only ordering and corresponding reference wording differ.",
+  "estimand": "position/order training package with corresponding reference wording; not pure history provenance, not literal old-TRAIN continuation",
+  "no_candidate_model_observation_used_to_choose_amendment": true,
+  "token_balance_gate": {
+    "maximum_relative_difference": 0.05,
+    "prompt_and_target_separate": true,
+    "truncate": false,
+    "status": "UNMEASURED_UNTIL_CLUSTER_TOKENIZATION"
+  },
+  "old_rows_with_history_related_origin": 1030,
+  "census_caveat": "Some authored dialogue first turns have empty actual history; history_origin alone does not establish a nonempty prefix."
+}

@@ -117,7 +117,7 @@ def _check_identity(identity):
         _require_record(identity["train"], "Training dataset")
     evaluation = identity.get("evaluation")
     _require_record(evaluation, "Evaluation dataset")
-    if evaluation.get("split") not in {"DEV700", "DEV-VOLUME"}:
+    if evaluation.get("split") not in {"DEV700", "DEV-VOLUME", "DEV-HISTORY"}:
         raise ValueError("The cluster evaluator requires an approved development split")
 
 

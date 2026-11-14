@@ -1,0 +1,132 @@
+{
+  "schema": "actual-history-train-package-v1",
+  "status": "INDEPENDENT_POLICY_REVIEW_APPROVED_CLUSTER_COLLECTION_PENDING",
+  "rows": 480,
+  "families": 192,
+  "scientific_anchor_functions": 24,
+  "groups": [
+    {
+      "group": "exchange_position",
+      "families": 24,
+      "rows": 96,
+      "scientific_functions": 24
+    },
+    {
+      "group": "error_and_success",
+      "families": 24,
+      "rows": 72,
+      "scientific_functions": 24
+    },
+    {
+      "group": "answer_parts",
+      "families": 24,
+      "rows": 48,
+      "scientific_functions": 24
+    },
+    {
+      "group": "original_corrected",
+      "families": 24,
+      "rows": 48,
+      "scientific_functions": 24
+    },
+    {
+      "group": "same_text_objects",
+      "families": 24,
+      "rows": 48,
+      "scientific_functions": 24
+    },
+    {
+      "group": "condition_correction",
+      "families": 24,
+      "rows": 48,
+      "scientific_functions": 24
+    },
+    {
+      "group": "compound_scope",
+      "families": 24,
+      "rows": 48,
+      "scientific_functions": 24
+    },
+    {
+      "group": "pending_reference",
+      "families": 24,
+      "rows": 72,
+      "scientific_functions": 24
+    }
+  ],
+  "distinct_prefixes": 360,
+  "distinct_question_sequences": 336,
+  "model_generation_requests": 1452,
+  "actual_observed_rows": 0,
+  "reconstructed_rows": 480,
+  "common_replay": {
+    "required_fraction": 0.5,
+    "domain_functions": 97,
+    "exact_common_positions_required": true
+  },
+  "control_candidates": 1030,
+  "source_train": {
+    "path": "assets/train-full-v2.jsonl",
+    "sha256": "024d21fba1d2fe73dc9f8d795552303acaeb099675d9d78df179c082c7e7afcb"
+  },
+  "prospective_amendment": "Same collected content in both variable halves: control reconstructs earliest legal addressed-object order; treatment retains actual collected order. This tests position/order plus corresponding reference wording, not history provenance alone or literal old-data replay.",
+  "matched_controls": {
+    "rows": 480,
+    "identity_pairs": 162,
+    "changed_order_pairs": 318
+  },
+  "files": {
+    "collection-specs.jsonl": {
+      "sha256": "beb6443c43aac3b47acec4a39ce31fcebe53d9aa0de47efbb471a17b899f89fc",
+      "bytes": 1641658
+    },
+    "corpus-candidate.jsonl": {
+      "sha256": "4baaa86068d2017b8b0662c2961f2ce34c83f62f8a4726cd16e960dc25f7316a",
+      "bytes": 63884394
+    },
+    "matched-control-candidate.jsonl": {
+      "sha256": "81974e599ee32b256318722e08acc0089d128592498682d3e5cfb7938da3245d",
+      "bytes": 64262399
+    },
+    "control-candidates.jsonl": {
+      "sha256": "d4d7f9e732be9b6f8d1dc4d2693dca3ab6a8ec27292a64091b7f8a09223446f7",
+      "bytes": 616045
+    },
+    "common-replay-coverage.json": {
+      "sha256": "b0d805dc4d0d6ebcd39fcbc1aabe5badd20f42483c00089405f2f12ff7ced316",
+      "bytes": 9695
+    }
+  },
+  "tokenizer_invoked": false,
+  "model_invoked": false,
+  "test_opened": false,
+  "fresh_dev_read": false,
+  "incidental_old_dev_exposure": "One head command on the monolithic registry asset printed embedded old DEV reviews. They were not selected or used as TRAIN sources; no claim of complete author blindness to old DEV.",
+  "matching": {
+    "token_tolerance_fraction": 0.05,
+    "scope": "domain obligation, action/object type, arity, condition signature, prompt and target token lengths",
+    "status": "UNMEASURED_REQUIRES_CLUSTER_TOKENIZATION_AND_FROZEN_MATCHING",
+    "no_truncation": true,
+    "no_silent_relaxation": true
+  },
+  "limitations": [
+    "Twenty-four scientific anchors recur across the eight groups; 192 families are not 192 independent scientific facts.",
+    "Gold replay checks validate execution, not independent scientific-source correctness or model quality.",
+    "Observed branches depend only on structural records and preauthored semantic policies; candidate outputs never define gold.",
+    "Rare-function expansion is held in common replay rather than added only to the treatment arm."
+  ],
+  "author": "history_train_author",
+  "independent_review": {
+    "path": "work/actual-history-v3/review/train-review.json",
+    "sha256": "ce7a4b63315adeb42104a9521a0d107172aade3a7f0ca43a4fc830e1dd891f6b",
+    "status": "approved"
+  },
+  "deployment": {
+    "specifications": "assets/history-train-specs.jsonl",
+    "review": "assets/history-train-review.json",
+    "common_coverage": "assets/history-common-coverage.json",
+    "authoring_files_listed_below_are_evidence_not_runtime_inputs": true,
+    "reconstructed_authoring_corpora_shipped": false,
+    "actual_histories_created_on_cluster": true
+  }
+}
