@@ -26,8 +26,10 @@ MAX_UPDATES = 3246
 MAX_SECONDS = 36 * 3600
 RESERVE = 512 * 1024 ** 2
 EVALUATION_BYTES = 192 * 1024 ** 2
-REFERENCE_REVISION = "math-reference-v1"
+REFERENCE_REVISION = "rope-alignment-v1"
 REFERENCE_POLICY = "math-chunked-v1"
+PREVIOUS_REFERENCE_REVISION = "math-reference-v1"
+ROPE_NUMERICS = "canonical-cpu-rope-reciprocal-fp32-v1"
 
 
 class BudgetLimit(RuntimeError):
@@ -982,6 +984,101 @@ def diagnostic_evidence(directory, parent, account, failures, parity):
     raise ValueError("Repair requires stored, bound four-boundary diagnostics showing finite MATH agreement and the 513 automatic-dispatch mismatch")
 
 
+def revision_evidence_records(revision):
+    records = [revision["parent_manifest"], *revision["failures"], *revision["diagnostic_evidence"].values()]
+    if revision.get("predecessor"):
+        records += [revision["predecessor"]["manifest"], *revision["predecessor"]["failures"]]
+    return records
+
+
+def require_budget_floor(account, snapshot):
+    if (account["elapsed_seconds"] < snapshot["elapsed_seconds"]
+            or account["charged_updates"] < snapshot["charged_updates"]
+            or account["stages"][:len(snapshot["stages"])] != snapshot["stages"]):
+        raise ValueError("The original budget was rolled back; the repair cannot reset spent work")
+
+
+def rope_revision(args, parent_directory, parent, account, current, parity):
+    directory = contained(parent_directory / "revisions" / PREVIOUS_REFERENCE_REVISION, parent_directory)
+    path = directory / "experiment.json"
+    predecessor = read(path)
+    previous = predecessor["revision"]
+    if (previous.get("id") != PREVIOUS_REFERENCE_REVISION or previous.get("reference_policy") != REFERENCE_POLICY
+            or previous.get("parent_identity_sha256") != digest(parent)
+            or any(predecessor[key] != parent[key] for key in ("config", "original", "assets", "origin", "runtime"))
+            or previous.get("shared_budget") != {"path": str((parent_directory / "budget.json").relative_to(ROOT)),
+                "identity_sha256": digest(parent), "maximum_seconds": account["maximum_seconds"], "maximum_updates": MAX_UPDATES}):
+        raise ValueError("The preserved MATH-reference predecessor differs from the original experiment")
+    require_budget_floor(account, previous["budget_at_revision"])
+    for record in revision_evidence_records(previous):
+        if file_record(contained(ROOT / record["path"], parent_directory), relative_to=ROOT) != record:
+            raise ValueError("The preserved predecessor evidence changed")
+    allowed = {"official-parity", "diagnose-parity", f"{PREVIOUS_REFERENCE_REVISION}/official-parity"}
+    phases = account["stages"] + ([account["inflight"]] if account.get("inflight") else [])
+    if account["charged_updates"] != 0 or any(phase.get("name") not in allowed for phase in phases):
+        raise ValueError("RoPE alignment may only continue the failed pre-training MATH-reference check")
+    for location in (parent_directory, directory):
+        if (any((location / name).exists() for name in ("result.json", "collection", "identities.json", "token-budget.json",
+                                                       "evaluations", "parity/parity.json"))
+                or ((location / "stages").exists() and any((location / "stages").iterdir()))):
+            raise ValueError("The predecessor already passed parity or started later stages")
+    if any(args.runs.glob(f"{args.run_id}-{PREVIOUS_REFERENCE_REVISION}-*")):
+        raise ValueError("The predecessor already created training or evaluation runs")
+    old_code = {record["path"]: record for record in predecessor["code"]["files"]}
+    new_code = {record["path"]: record for record in current["code"]["files"]}
+    def basename(record):
+        return dict(record, path=Path(record["path"]).name)
+    expected = {name: basename(predecessor["assets"][key]) for name, key in (
+        ("checkpoint", "initial_checkpoint"), ("base", "base"), ("tokenizer", "tokenizer"),
+        ("probes", "history_replay"), ("native_template", "history_template"))}
+    expected.update(implementation=basename(old_code["history_parity.py"]), runtime=basename(old_code["model.py"]),
+                    reference_version=parity.REFERENCE_VERSION, reference_policy=parity.reference_policy_record(REFERENCE_POLICY),
+                    tolerances=parity.TOLERANCES)
+    required = {f"boundary-{length}" for length in (17, 511, 512, 513, 1025)}
+    for length in (17, 511, 512, 513, 1025):
+        required.update(f"reference-chunked-dense-{length}-positions-{first}:{min(first + 128, length)}"
+                        for first in range(0, length, 128))
+        required.update((f"reference-chunked-dense-cache-offset-{length}",
+                         f"reference-dense-cache-uncached-offset-{length}"))
+    failures, observed = [], False
+    for failure_path in sorted((directory / "parity").glob("parity-failed*.json")):
+        failure = read(failure_path)
+        if failure.get("passed") is not False or failure.get("binding") != expected:
+            raise ValueError("The MATH-reference failure is not bound to its preserved code and inputs")
+        failures.append(file_record(failure_path, relative_to=ROOT))
+        if failure.get("error") in ("OSError", "IOError"):
+            continue
+        mismatch = failure.get("mismatch") or {}
+        checks = {row.get("label"): row for row in failure.get("completed_checks", [])}
+        if (failure.get("error") != "TensorMismatch" or mismatch.get("label") != "complete-prompt:train-friday-dialogue-020-turn-5"
+                or mismatch.get("within_tolerance") is not False or mismatch.get("nonfinite_count") != 0
+                or mismatch.get("actual_shape") != [1, 1, 262144] or mismatch.get("expected_shape") != [1, 1, 262144]
+                or type(mismatch.get("mismatch_count")) is not int or not 0 < mismatch["mismatch_count"] <= 262144
+                or mismatch.get("argmax_agreement") is not True
+                or any(mismatch.get(key) != value for key, value in parity.TOLERANCES["logits"].items())
+                or not isinstance(mismatch.get("maximum_absolute_error"), (int, float))
+                or not math.isfinite(mismatch["maximum_absolute_error"])
+                or not required.issubset(checks)
+                or any(checks[label].get("within_tolerance") is not True or checks[label].get("nonfinite_count") != 0
+                       or checks[label].get("mismatch_count") != 0
+                       or any(checks[label].get(key) != value for key, value in parity.TOLERANCES["logits"].items())
+                       for label in required)):
+            raise ValueError("RoPE alignment requires the specific finite longest-prompt mismatch after the complete dense/chunked controls")
+        observed = True
+    if not observed or not any(phase.get("name") == f"{PREVIOUS_REFERENCE_REVISION}/official-parity"
+                               and phase.get("interrupted") is True for phase in account["stages"]):
+        raise ValueError("The predecessor's longest-prompt failure and charged interrupted phase are required")
+    if old_code["model.py"]["sha256"] == new_code["model.py"]["sha256"]:
+        raise ValueError("RoPE alignment requires the explicitly corrected runtime, not a repeated unmodified attempt")
+    return {**previous, "id": REFERENCE_REVISION, "budget_at_revision": account,
+            "predecessor": {"id": PREVIOUS_REFERENCE_REVISION, "identity_sha256": digest(predecessor),
+                            "manifest": file_record(path, relative_to=ROOT), "failures": failures},
+            "runtime_numerics": {"id": ROPE_NUMERICS, "old_model": old_code["model.py"], "new_model": new_code["model.py"],
+                "correction": "Initialize FP32 inverse frequencies on CPU as 1/(base**(int64_arange.float()/256)), then copy and cache per device; replace per-call CUDA negative-exponent power",
+                "weights_and_optimizer_unchanged": True, "tolerances_unchanged": True},
+            "reason": "Align runtime RoPE frequency initialization with the canonical official CPU operation order; full strict parity remains required"}
+
+
 def reference_revision(args, runner, current, parity):
     if args.hours is not None:
         raise ValueError("A parity repair retains the original budget; --hours cannot reset or change it")
@@ -1004,6 +1101,11 @@ def reference_revision(args, runner, current, parity):
     path = directory / "experiment.json"
     if path.exists():
         revision = read(path)["revision"]
+    elif REFERENCE_REVISION == "rope-alignment-v1":
+        revision = rope_revision(args, parent_directory, parent, account, current, parity)
+        if directory.exists() and any(directory.iterdir()):
+            raise ValueError("The revision directory contains unbound files; it will not be reused")
+        directory.mkdir(parents=True, exist_ok=True)
     else:
         _, checked_parent, _, _, _, failures = diagnostic_context(args, runner)
         if checked_parent != parent:
@@ -1033,13 +1135,13 @@ def reference_revision(args, runner, current, parity):
             or revision.get("parent_identity_sha256") != parent_binding
             or revision.get("shared_budget") != expected_budget):
         raise ValueError("The frozen reference revision or shared budget binding changed")
-    snapshot = revision["budget_at_revision"]
-    if (account["elapsed_seconds"] < snapshot["elapsed_seconds"]
-            or account["charged_updates"] < snapshot["charged_updates"]
-            or account["stages"][:len(snapshot["stages"])] != snapshot["stages"]):
-        raise ValueError("The original budget was rolled back; the repair cannot reset spent work")
-    records = [revision["parent_manifest"], *revision["failures"], *revision["diagnostic_evidence"].values()]
-    for record in records:
+    require_budget_floor(account, revision["budget_at_revision"])
+    if REFERENCE_REVISION == "rope-alignment-v1":
+        numerics = revision.get("runtime_numerics", {})
+        models = {record["path"]: record for record in current["code"]["files"]}
+        if numerics.get("id") != ROPE_NUMERICS or numerics.get("new_model") != models["model.py"]:
+            raise ValueError("The frozen canonical RoPE runtime correction changed")
+    for record in revision_evidence_records(revision):
         if file_record(contained(ROOT / record["path"], parent_directory), relative_to=ROOT) != record:
             raise ValueError(f"Original repair evidence changed: {record['path']}")
     manifest = dict(current, revision=revision)
@@ -1077,7 +1179,8 @@ def compare(args, runner):
         code_paths.extend(str(path.relative_to(ROOT)) for path in sorted((ROOT / "evaluation").rglob("*.mjs")))
         code_paths.extend(config.get("code_files", []))
         manifest = {"config": config, "original": original, "assets": {key: value[1] for key, value in assets.items()}, "origin": receipt,
-                    "runtime": hardware, "code": code_record(ROOT, sorted(set(code_paths)))}
+                    "runtime": hardware, "code": code_record(ROOT, sorted(set(code_paths))),
+                    "reference_policy": history_parity.reference_policy_record(REFERENCE_POLICY)}
         budget_path, budget_binding = directory / "budget.json", digest(manifest)
         budget_hours, worker_args = 36 if args.hours is None else args.hours, args
         if repair:
@@ -1090,7 +1193,7 @@ def compare(args, runner):
             records = list(manifest["assets"].values()) + manifest["code"]["files"]
             if repair:
                 revision = manifest["revision"]
-                records += [revision["parent_manifest"], *revision["failures"], *revision["diagnostic_evidence"].values()]
+                records += revision_evidence_records(revision)
             for record in records:
                 if file_record(contained(ROOT / record["path"]), relative_to=ROOT) != record:
                     raise ValueError(f"Frozen experiment input changed: {record['path']}")
@@ -1123,7 +1226,7 @@ def compare(args, runner):
             if value.get("passed") is not True:
                 raise RuntimeError("Independent official-runtime parity did not pass; training is blocked")
         try:
-            parity_options = {"reference_policy": REFERENCE_POLICY} if repair else {}
+            parity_options = {"reference_policy": REFERENCE_POLICY}
             stages.run("official-parity", lambda deadline: history_parity.verify(
                 hook_assets, initial, parity_dir, deadline, budget, **parity_options), verify_parity)
             collection = directory / "collection"

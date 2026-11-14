@@ -201,6 +201,7 @@ class Runtime:
             raise ValueError("The runtime supports batches of two or four examples")
         self.expected_batch_size = expected_batch_size
         self.device = torch.device(device)
+        self._rotary_frequency_cache = {}
         if (sys.platform != "linux" or self.device.type != "cuda" or not torch.cuda.is_available()
                 or torch.__version__.split("+")[0] != "2.7.1"
                 or torch.cuda.get_device_capability(self.device) != (7, 0)
@@ -283,10 +284,19 @@ class Runtime:
     def _norm(self, value, path):
         return value * (value.square().mean(-1, keepdim=True) + 1e-6).rsqrt() * self.base[path]
 
+    def _rope_frequencies(self, local):
+        cache = getattr(self, "_rotary_frequency_cache", None)
+        if cache is None:
+            self._rotary_frequency_cache = cache = {}
+        if local not in cache:
+            dimensions = torch.arange(0, HEAD_DIM, 2, device="cpu", dtype=torch.int64).float()
+            frequencies = 1.0 / ((10000.0 if local else 1000000.0) ** (dimensions / HEAD_DIM))
+            cache[local] = frequencies.to(device=self.device)
+        return cache[local]
+
     def _rope(self, value, offset, local):
         positions = torch.arange(offset, offset + value.shape[2], device=self.device, dtype=torch.float32)
-        dimensions = torch.arange(0, HEAD_DIM, 2, device=self.device, dtype=torch.float32)
-        frequencies = (10000.0 if local else 1000000.0) ** (-dimensions / HEAD_DIM)
+        frequencies = self._rope_frequencies(local)
         phase = torch.outer(positions, frequencies).repeat(1, 2)
         left, right = value.chunk(2, dim=-1)
         turned = torch.cat((-right, left), dim=-1)

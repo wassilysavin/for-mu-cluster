@@ -259,6 +259,114 @@ def validate_chunked_reference(runtime, reference, tokens, checks, check_time):
             print(f"Reference policy control {length}: all positions and three continuation tokens agree", flush=True)
 
 
+def verify_rotary_alignment(runtime, reference, checks, check_time):
+    import torch
+    from transformers.models.gemma3.modeling_gemma3 import apply_rotary_pos_emb
+    import model
+
+    def exact(actual, expected, label):
+        record = {"label": label, "exact": torch.equal(actual, expected),
+                  "maximum_absolute_error": float((actual - expected).abs().max())}
+        checks.append(record)
+        if not record["exact"]:
+            raise AssertionError(f"Official RoPE alignment failed: {json.dumps(record, sort_keys=True)}")
+
+    with torch.no_grad():
+        value = torch.linspace(-1, 1, model.HEAD_DIM, device=runtime.device).repeat(1, model.HEADS, 3, 1)
+        for local, rotary in ((True, reference.rotary_emb_local), (False, reference.rotary_emb)):
+            kind = "local" if local else "global"
+            check_time()
+            exact(runtime._rope_frequencies(local), rotary.inv_freq, f"rope-{kind}-inverse-frequencies")
+            for offset in (0, 511, 512, 513, 1025, 12743, 23024, 32765):
+                check_time()
+                positions = torch.arange(offset, offset + 3, device=runtime.device).unsqueeze(0)
+                cosine, sine = rotary(value, positions)
+                expected, _ = apply_rotary_pos_emb(value, value, cosine, sine)
+                exact(runtime._rope(value, offset, local), expected, f"rope-{kind}-rotation-{offset}")
+    print("Official RoPE frequencies and rotations match exactly through position 32767", flush=True)
+
+
+def verify_native_generations(runtime, probes, official_logits, check_time):
+    import torch
+    results = []
+    with torch.no_grad():
+        for row in probes:
+            tokens = row["input_ids"][:row["prompt_tokens"]]
+            custom_cache = reference_cache = None
+            current, offset, generated = tokens, 0, []
+            for index in range(512):
+                check_time()
+                actual, custom_cache = custom_logits(runtime, current, cache=custom_cache, offset=offset)
+                expected, reference_cache = official_logits(current, cache=reference_cache, use_cache=True)
+                a, b = actual.argmax(-1).item(), expected.argmax(-1).item()
+                if a != b:
+                    raise AssertionError(f"Complete native generation differs: {row['case_id']}, token {index}")
+                generated.append(a)
+                if a == 50:
+                    break
+                offset += len(current)
+                current = [a]
+            require_complete_native_call(generated)
+            results.append({"case_id": row["case_id"], "prompt_tokens": len(tokens),
+                            "generated_tokens": generated, "complete_native_batch": True})
+            print(f"Complete native generation agrees: {row['case_id']} ({len(generated)} tokens)", flush=True)
+    return results
+
+
+def full_prompt_layer_diagnostics(runtime, reference, tokens, deadline, budget, reference_policy):
+    import torch
+    import model
+    started = time()
+    result = {"status": "INCOMPLETE", "scope": "propagated last-token hidden states, not same-input layers",
+              "prompt_tokens": len(tokens), "reference_policy": reference_policy, "layers": []}
+    if deadline - started < 15:
+        return {**result, "status": "SKIPPED", "reason": "Less than 15 seconds remain for supplemental diagnostics"}
+    stop = min(deadline, started + 120)
+
+    def check_time():
+        budget.check()
+        if time() >= stop:
+            raise TimeoutError("Supplemental layer trace reached its remaining shared time limit")
+
+    last = {}
+    handles = []
+    try:
+        check_time()
+        with torch.no_grad():
+            for index, layer in enumerate(reference.layers):
+                def capture(module, inputs, output, index=index):
+                    last[index] = decoder_hidden_states(output)[:, -1:].detach().clone()
+                handles.append(layer.register_forward_hook(capture))
+            try:
+                reference_hidden_states(runtime, reference, tokens, reference_policy=reference_policy, check_time=check_time)
+            finally:
+                for handle in handles:
+                    handle.remove()
+                handles.clear()
+            if len(last) != model.LAYERS:
+                raise ValueError("Supplemental reference layer trace is incomplete")
+            hidden = runtime._embed(tokens)
+            for index in range(model.LAYERS):
+                check_time()
+                hidden = runtime._layer(hidden, index)
+                result["layers"].append({"layer": index, "local": model.is_local(index),
+                                          **tensor_diagnostics(hidden[:, -1:], last[index], "logits",
+                                                               f"last-token-layer-{index}", argmax=False)})
+            result["status"] = "COMPLETE"
+    except Exception as error:
+        result.update(error=type(error).__name__, message=str(error))
+    finally:
+        for handle in handles:
+            handle.remove()
+        result["seconds"] = time() - started
+    first_bad = next((row for row in result["layers"] if not row["within_tolerance"]), None)
+    detail = (f"first divergence layer {first_bad['layer']} "
+              f"({'sliding' if first_bad['local'] else 'global'}), max_abs={first_bad['maximum_absolute_error']}"
+              if first_bad else f"no divergence among {len(result['layers'])}/{model.LAYERS} measured layers")
+    print(f"Supplemental long-prompt trace: {result['status']}; {detail}; original failure remains", flush=True)
+    return result
+
+
 def selected_probes(path):
     lengths = []
     with path.open() as stream:
@@ -392,9 +500,8 @@ def diagnose(assets, checkpoint, directory, deadline, budget):
                       f"default_math_max={row['default_vs_math']['maximum_absolute_error']}", flush=True)
             check_time()
             report["rope"] = []
-            dimensions = torch.arange(0, model.HEAD_DIM, 2, device=runtime.device, dtype=torch.float32)
             for local, rotary in ((True, reference.rotary_emb_local), (False, reference.rotary_emb)):
-                custom_frequency = (10000.0 if local else 1000000.0) ** (-dimensions / model.HEAD_DIM)
+                custom_frequency = runtime._rope_frequencies(local)
                 report["rope"].append(tensor_diagnostics(custom_frequency, rotary.inv_freq, "logits",
                                                         "local-frequencies" if local else "global-frequencies",
                                                         argmax=False))
@@ -527,6 +634,7 @@ def verify(assets, checkpoint, directory, deadline, budget, *, reference_policy=
             return reference_logits(runtime, reference, tokens, reference_policy=reference_policy,
                                     check_time=check_time, **kwargs)
 
+        verify_rotary_alignment(runtime, reference, checks, check_time)
         if reference_policy == "math-chunked-v1":
             validate_chunked_reference(runtime, reference, first, checks, check_time)
         with torch.no_grad():
@@ -541,9 +649,18 @@ def verify(assets, checkpoint, directory, deadline, budget, *, reference_policy=
                 tokens = row["input_ids"][:row["prompt_tokens"]]
                 actual, _ = custom_logits(runtime, tokens)
                 expected, _ = official_logits(tokens)
-                checks.append(compare_tensor(actual, expected, "logits", f"complete-prompt:{row['case_id']}"))
-                if actual.argmax(-1).item() != expected.argmax(-1).item():
-                    raise AssertionError("Reference and runtime disagree on complete-prompt greedy token")
+                try:
+                    checks.append(compare_tensor(actual, expected, "logits", f"complete-prompt:{row['case_id']}"))
+                    if actual.argmax(-1).item() != expected.argmax(-1).item():
+                        raise AssertionError("Reference and runtime disagree on complete-prompt greedy token")
+                except AssertionError as error:
+                    try:
+                        error.layer_diagnostics = full_prompt_layer_diagnostics(
+                            runtime, reference, tokens, stop, budget, reference_policy)
+                    except Exception as diagnostic_error:
+                        error.layer_diagnostics = {"status": "INCOMPLETE", "error": type(diagnostic_error).__name__,
+                                                   "message": str(diagnostic_error)}
+                    raise
             tokens = first[:513]
             custom_cache = ref_cache = None
             custom_generated, reference_generated = [], []
@@ -564,23 +681,7 @@ def verify(assets, checkpoint, directory, deadline, budget, *, reference_policy=
                 reference_generated.append(b)
                 offset += len(current)
                 current = [a]
-        with torch.no_grad():
-            tokens = probes[0]["input_ids"][:probes[0]["prompt_tokens"]]
-            custom_cache = ref_cache = None
-            current, offset, complete_call = tokens, 0, []
-            for index in range(512):
-                check_time()
-                actual, custom_cache = custom_logits(runtime, current, cache=custom_cache, offset=offset)
-                expected, ref_cache = official_logits(current, cache=ref_cache, use_cache=True)
-                a, b = actual.argmax(-1).item(), expected.argmax(-1).item()
-                if a != b:
-                    raise AssertionError(f"Complete native generation differs at token {index}")
-                complete_call.append(a)
-                if a == 50:
-                    break
-                offset += len(current)
-                current = [a]
-        require_complete_native_call(complete_call)
+        complete_calls = verify_native_generations(runtime, probes, official_logits, check_time)
         check_time()
         prompt, completion = first[:17], first[17:20]
         actual_loss = runtime._loss_sum(prompt, completion) / len(completion)
@@ -606,8 +707,9 @@ def verify(assets, checkpoint, directory, deadline, budget, *, reference_policy=
         result = {"schema_version": 1, "passed": True, "binding": binding, "checks": checks,
                   "seconds": time() - started, "checkpoint_reload_exact": True,
                   "cached_greedy_tokens": custom_generated,
-                  "complete_prompt_generated_tokens": complete_call,
-                  "complete_native_batch": complete_call[-1] == 50,
+                  "complete_prompt_generated_tokens": complete_calls[0]["generated_tokens"],
+                  "complete_prompt_generations": complete_calls,
+                  "complete_native_batch": all(row["complete_native_batch"] for row in complete_calls),
                   "effective_embedding_scale": 25.25, "reference_downloaded_model_weights": False,
                   "note": "Independent official operations; same dequantized tensors, BF16-rounded scale and separate LoRA parameters"}
         publish_json(receipt_path, result)
@@ -618,7 +720,9 @@ def verify(assets, checkpoint, directory, deadline, budget, *, reference_policy=
             failure = directory / f"parity-failed-{time_ns()}.json"
         publish_json(failure, {"passed": False, "binding": binding, "completed_checks": checks,
                                "error": type(error).__name__, "message": str(error),
-                               "mismatch": getattr(error, "diagnostics", None), "seconds": time() - started})
+                               "mismatch": getattr(error, "diagnostics", None),
+                               "supplemental_layer_diagnostics": getattr(error, "layer_diagnostics", None),
+                               "seconds": time() - started})
         raise
     finally:
         if runtime is not None:
