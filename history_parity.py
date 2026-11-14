@@ -2,6 +2,7 @@
 
 from importlib.metadata import version
 import json
+import math
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
@@ -26,12 +27,53 @@ def path_for(assets, key):
     return Path(value)
 
 
-def compare_tensor(actual, expected, kind, label):
+def tensor_diagnostics(actual, expected, kind, label, *, argmax=True):
     import torch
     a, b = actual.detach().float(), expected.detach().float()
-    torch.testing.assert_close(a, b, **TOLERANCES[kind], msg=label)
-    return {"label": label, "maximum_absolute_error": float((a - b).abs().max()),
-            "rms_error": float((a - b).square().mean().sqrt()), **TOLERANCES[kind]}
+    result = {"label": label, "actual_shape": list(a.shape), "expected_shape": list(b.shape),
+              **TOLERANCES[kind]}
+    if a.shape != b.shape or a.numel() == 0:
+        return {**result, "within_tolerance": False, "reason": "shape mismatch or empty tensor"}
+    difference = (a - b).abs()
+    finite = torch.isfinite(a) & torch.isfinite(b)
+    close = torch.isclose(a, b, **TOLERANCES[kind])
+    index = int(difference.nan_to_num(nan=float("inf")).reshape(-1).argmax())
+    absolute = float(difference.reshape(-1)[index])
+    expected_at_max = float(b.reshape(-1)[index])
+    relative = absolute / abs(expected_at_max) if expected_at_max else None
+
+    def number(value):
+        return value if value is not None and math.isfinite(value) else None
+
+    result.update(within_tolerance=bool(close.all()), elements=a.numel(),
+                  mismatch_count=int((~close).sum()), nonfinite_count=int((~finite).sum()),
+                  maximum_absolute_error=number(absolute),
+                  rms_error=number(float(difference.square().mean().sqrt())),
+                  relative_error_at_maximum_absolute=number(relative),
+                  actual_at_maximum_absolute=number(float(a.reshape(-1)[index])),
+                  expected_at_maximum_absolute=number(expected_at_max), flat_index_at_maximum_absolute=index)
+    if argmax and kind == "logits" and a.ndim >= 2:
+        actual_ids, expected_ids = a.argmax(-1), b.argmax(-1)
+        result.update(argmax_agreement=bool((actual_ids == expected_ids).all()),
+                      actual_argmax=actual_ids.reshape(-1).tolist(),
+                      expected_argmax=expected_ids.reshape(-1).tolist())
+    return result
+
+
+class TensorMismatch(AssertionError):
+    def __init__(self, diagnostics):
+        self.diagnostics = diagnostics
+        super().__init__(json.dumps(diagnostics, sort_keys=True))
+
+
+def compare_tensor(actual, expected, kind, label):
+    import torch
+    diagnostics = tensor_diagnostics(actual, expected, kind, label)
+    try:
+        torch.testing.assert_close(actual.detach().float(), expected.detach().float(), **TOLERANCES[kind])
+    except AssertionError as error:
+        raise TensorMismatch(diagnostics) from error
+    return diagnostics
 
 
 def official_model(runtime):
@@ -131,6 +173,170 @@ def template_check(tokenizer, probes, path):
     if len(checks) != 2:
         raise ValueError("Native envelope parity requires two complete TRAIN prompts")
     return checks
+
+
+def diagnose(assets, checkpoint, directory, deadline, budget):
+    import platform
+    import torch
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    from transformers.masking_utils import create_sliding_window_causal_mask
+    import model
+
+    if version("transformers") != REFERENCE_VERSION:
+        raise RuntimeError(f"Diagnostics require transformers=={REFERENCE_VERSION}")
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    started, runtime, reference = time(), None, None
+    stop = min(deadline, started + 600)
+    report_path = directory / f"diagnostic-{time_ns()}.json"
+    report = {"schema_version": 1, "status": "DIAGNOSTIC_INCOMPLETE", "report_path": str(report_path),
+              "diagnostic_only": True, "training_performed": False, "tolerances": TOLERANCES,
+              "binding": {"checkpoint": file_record(Path(checkpoint)),
+                          "base": file_record(path_for(assets, "base")),
+                          "probes": file_record(path_for(assets, "history_replay")),
+                          "implementation": file_record(Path(__file__)),
+                          "runtime": file_record(Path(model.__file__))},
+              "environment": {"python": platform.python_version(), "torch": str(torch.__version__),
+                              "cuda": torch.version.cuda, "transformers": version("transformers")},
+              "attention_policy": {"custom_local": "MATH, 256-query blocks with cropped KV",
+                                   "custom_global": "EFFICIENT_ATTENTION",
+                                   "reference_default": "SDPA automatic dispatch; actual kernel not instrumented",
+                                   "reference_control": "MATH; diagnostic only"},
+              "boundaries": [], "layers": [], "cached": []}
+
+    def check_time():
+        budget.check()
+        if time() >= stop:
+            raise TimeoutError("Parity diagnostics exceeded the 10-minute or remaining experiment budget")
+
+    def mask_diagnostic(length):
+        positions = torch.arange(length, device=runtime.device)
+        official = create_sliding_window_causal_mask(
+            reference.config, torch.empty((1, length, model.WIDTH), device=runtime.device),
+            None, positions, None)
+        skipped = official is None
+        if skipped:
+            official = positions[None, :] <= positions[:, None]
+        else:
+            if official.dtype != torch.bool:
+                raise TypeError("The pinned SDPA mask is unexpectedly non-boolean")
+            official = official[0, 0]
+        custom = torch.zeros((length, length), dtype=torch.bool, device=runtime.device)
+        for first in range(0, length, 256):
+            last = min(first + 256, length)
+            begin = max(0, first - model.WINDOW + 1)
+            qp, kp = positions[first:last, None], positions[None, begin:last]
+            custom[first:last, begin:last] = (kp <= qp) & (kp > qp - model.WINDOW)
+        mismatches = int((custom != official).sum())
+        return {"exact_equal": mismatches == 0, "mismatch_count": mismatches,
+                "reference_uses_causal_shortcut": skipped,
+                "last_query_key_count": int(custom[-1].sum())}
+
+    try:
+        check_time()
+        runtime = model.Runtime(path_for(assets, "base"), Path(checkpoint), expected_batch_size=4)
+        reference, _ = official_model(runtime)
+        report["environment"].update(device=str(runtime.device),
+                                     device_name=torch.cuda.get_device_name(runtime.device),
+                                     capability=list(torch.cuda.get_device_capability(runtime.device)),
+                                     flash_sdp_enabled=torch.backends.cuda.flash_sdp_enabled(),
+                                     efficient_sdp_enabled=torch.backends.cuda.mem_efficient_sdp_enabled(),
+                                     math_sdp_enabled=torch.backends.cuda.math_sdp_enabled())
+        report["window"] = {"custom": model.WINDOW, "reference": reference.config.sliding_window,
+                            "custom_layer_types": ["sliding_attention" if model.is_local(i) else "full_attention"
+                                                   for i in range(model.LAYERS)],
+                            "reference_layer_types": reference.config.layer_types}
+        first = selected_probes(path_for(assets, "history_replay"))[0]["input_ids"]
+        if len(first) < 514:
+            raise ValueError("The frozen TRAIN probe is shorter than the diagnostic boundaries")
+        with torch.no_grad():
+            for length in (511, 512, 513, 514):
+                check_time()
+                tokens = first[:length]
+                actual, _ = custom_logits(runtime, tokens, count=3)
+                check_time()
+                expected, _ = reference_logits(runtime, reference, tokens, count=3)
+                check_time()
+                with sdpa_kernel(SDPBackend.MATH):
+                    math_expected, _ = reference_logits(runtime, reference, tokens, count=3)
+                row = {"length": length, "mask": mask_diagnostic(length),
+                       "custom_vs_default": tensor_diagnostics(actual, expected, "logits", f"boundary-{length}"),
+                       "custom_vs_math": tensor_diagnostics(actual, math_expected, "logits", f"math-{length}"),
+                       "default_vs_math": tensor_diagnostics(expected, math_expected, "logits", f"backend-{length}")}
+                report["boundaries"].append(row)
+                delta = row["custom_vs_default"]
+                print(f"Parity diagnostic {length}: mismatches={delta['mismatch_count']} "
+                      f"max_abs={delta['maximum_absolute_error']} argmax_equal={delta['argmax_agreement']} "
+                      f"mask_equal={row['mask']['exact_equal']} "
+                      f"custom_math_max={row['custom_vs_math']['maximum_absolute_error']} "
+                      f"default_math_max={row['default_vs_math']['maximum_absolute_error']}", flush=True)
+            check_time()
+            report["rope"] = []
+            dimensions = torch.arange(0, model.HEAD_DIM, 2, device=runtime.device, dtype=torch.float32)
+            for local, rotary in ((True, reference.rotary_emb_local), (False, reference.rotary_emb)):
+                custom_frequency = (10000.0 if local else 1000000.0) ** (-dimensions / model.HEAD_DIM)
+                report["rope"].append(tensor_diagnostics(custom_frequency, rotary.inv_freq, "logits",
+                                                        "local-frequencies" if local else "global-frequencies",
+                                                        argmax=False))
+            captured = []
+
+            def capture_layer(module, inputs, output):
+                captured.append((inputs[0].detach(), output.detach()))
+
+            handles = [layer.register_forward_hook(capture_layer) for layer in reference.layers]
+            try:
+                reference_logits(runtime, reference, first[:513])
+            finally:
+                for handle in handles:
+                    handle.remove()
+            if len(captured) != model.LAYERS:
+                raise ValueError("Reference layer trace is incomplete")
+            hidden = runtime._embed(first[:513])
+            for index, (reference_input, reference_output) in enumerate(captured):
+                check_time()
+                hidden = runtime._layer(hidden, index)
+                isolated = runtime._layer(reference_input, index)
+                report["layers"].append({"layer": index, "local": model.is_local(index),
+                                          "propagated": tensor_diagnostics(hidden, reference_output, "logits",
+                                                                           f"layer-{index}", argmax=False),
+                                          "same_input": tensor_diagnostics(isolated, reference_output, "logits",
+                                                                           f"isolated-layer-{index}", argmax=False)})
+            del captured, hidden, isolated
+            custom_cache = reference_cache = None
+            current, offset = first[:511], 0
+            for length in (511, 512, 513, 514):
+                check_time()
+                actual, custom_cache = custom_logits(runtime, current, cache=custom_cache, offset=offset)
+                expected, reference_cache = reference_logits(runtime, reference, current,
+                                                             cache=reference_cache, use_cache=True)
+                plain, _ = custom_logits(runtime, first[:length])
+                report["cached"].append({"length": length,
+                                         "custom_vs_reference": tensor_diagnostics(actual, expected, "logits", f"cache-{length}"),
+                                         "custom_vs_uncached": tensor_diagnostics(actual, plain, "logits", f"cache-plain-{length}")})
+                offset = length
+                current = first[length:length + 1]
+        report["status"] = "DIAGNOSTIC_COMPLETE"
+    except Exception as error:
+        report.update(error=type(error).__name__, message=str(error))
+    finally:
+        if runtime is not None:
+            runtime.close()
+        del runtime, reference
+        torch.cuda.empty_cache()
+        report["seconds"] = time() - started
+        publish_json(report_path, report)
+    for kind in ("propagated", "same_input"):
+        first_bad = next((row for row in report["layers"] if not row[kind]["within_tolerance"]), None)
+        print(f"First divergent layer ({kind}): " + ("none in completed checks" if first_bad is None else
+              f"{first_bad['layer']}; max_abs={first_bad[kind]['maximum_absolute_error']}"), flush=True)
+    for row in report["cached"]:
+        delta, plain = row["custom_vs_reference"], row["custom_vs_uncached"]
+        print(f"Cache {row['length']}: reference_max={delta['maximum_absolute_error']} "
+              f"uncached_max={plain['maximum_absolute_error']} argmax_equal={delta['argmax_agreement']}", flush=True)
+    print(f"Parity diagnosis: {report['status']}; report={report_path}", flush=True)
+    if report.get("error"):
+        print(f"{report['error']}: {report['message']}", flush=True)
+    return report
 
 
 def verify(assets, checkpoint, directory, deadline, budget):
@@ -273,7 +479,8 @@ def verify(assets, checkpoint, directory, deadline, budget):
         if failure.exists():
             failure = directory / f"parity-failed-{time_ns()}.json"
         publish_json(failure, {"passed": False, "binding": binding, "completed_checks": checks,
-                               "error": type(error).__name__, "message": str(error), "seconds": time() - started})
+                               "error": type(error).__name__, "message": str(error),
+                               "mismatch": getattr(error, "diagnostics", None), "seconds": time() - started})
         raise
     finally:
         if runtime is not None:

@@ -4,11 +4,13 @@ from copy import deepcopy
 import importlib.util
 import json
 import io
-from contextlib import redirect_stdout
+import os
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 import sys
 import struct
 import subprocess
+import tempfile
 from types import ModuleType, SimpleNamespace
 from tempfile import TemporaryDirectory
 import unittest
@@ -19,6 +21,227 @@ sys.path.insert(0, str(REPO))
 import history as h
 import history_parity as parity
 import history_prepare as prepare
+import private_runtime
+
+
+class PrivateRuntimeTests(unittest.TestCase):
+    def test_tmux_socket_is_short_and_cannot_be_redirected(self):
+        cluster_root = Path('/ceph/mri.meduniwien.ac.at/departments/physics/fmrilab/home/vsavin/for-mu-cluster')
+        locations = {'root': str(cluster_root / '.runtime')}
+        command = private_runtime.private_command(['tmux', 'new', '-s', 'example'], locations)
+        self.assertEqual(command[1:3], ['-S', str(cluster_root / '.runtime/tmux')])
+        self.assertLess(len(os.fsencode(command[2])), 104)
+        with self.assertRaisesRegex(ValueError, 'fixes the tmux socket'):
+            private_runtime.private_command(['tmux', '-S', '/outside/socket', 'new'], locations)
+
+    def test_overrides_inherited_paths_and_memoized_tempdir(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outside = root / 'outside'
+            outside.mkdir()
+            project = root / 'project'
+            project.mkdir()
+            names = [*private_runtime.CACHE_PATHS, 'TMPDIR', 'TMP', 'TEMP', 'PYTHONPYCACHEPREFIX']
+            with patch.dict(os.environ, {name: str(outside) for name in names}), \
+                    patch.object(tempfile, 'tempdir', str(outside)), \
+                    patch.object(sys, 'dont_write_bytecode', False), patch.object(sys, 'pycache_prefix', None):
+                locations = private_runtime.configure_private_runtime(project)
+                for name in names:
+                    self.assertTrue(Path(os.environ[name]).is_relative_to(project / '.runtime'), name)
+                self.assertEqual(tempfile.gettempdir(), locations['temporary'])
+                self.assertTrue(sys.dont_write_bytecode)
+                with TemporaryDirectory() as created:
+                    self.assertTrue(Path(created).is_relative_to(project / '.runtime/tmp'))
+                    (Path(created) / 'owned.json').write_text('{}')
+                self.assertFalse(Path(created).exists())
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_rejects_symlinked_scratch_and_nested_cache(self):
+        for relative in ('.runtime', '.runtime/cache/huggingface'):
+            with self.subTest(relative=relative), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                project, outside = root / 'project', root / 'outside'
+                project.mkdir()
+                outside.mkdir()
+                link = project / relative
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(outside, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, 'real directory'):
+                    private_runtime.configure_private_runtime(project)
+                self.assertEqual(list(outside.iterdir()), [])
+
+    def test_launcher_child_inherits_private_temporary_paths(self):
+        probe = ('import json,os,tempfile; from pathlib import Path; '
+                 'd=tempfile.mkdtemp(); p=Path(d)/"probe"; p.write_text("owned"); '
+                 'p.unlink(); os.rmdir(d); '
+                 'print(json.dumps({"directory":d,"cache":os.environ["PIP_CACHE_DIR"],'
+                 '"bytecode":os.environ["PYTHONDONTWRITEBYTECODE"]}))')
+        with TemporaryDirectory() as foreign:
+            root = Path(foreign)
+            binary = root / 'bin'
+            binary.mkdir()
+            (binary / 'python').symlink_to(sys.executable)
+            startup = root / 'startup.json'
+            (root / 'sitecustomize.py').write_text(
+                'import json,os; from pathlib import Path; '
+                f'Path({str(startup)!r}).write_text(json.dumps(dict(os.environ)))')
+            result = subprocess.run([str(REPO / 'cluster'), sys.executable, '-c', probe], cwd=foreign,
+                                    env={**os.environ, 'TMPDIR': foreign, 'PIP_CACHE_DIR': foreign,
+                                         'PYTHONPATH': foreign, 'PATH': str(binary) + os.pathsep + os.environ['PATH']},
+                                    check=True, capture_output=True, text=True)
+            initial = json.loads(startup.read_text())
+            self.assertEqual(initial['TMPDIR'], str(REPO / '.runtime/tmp'))
+            self.assertEqual(initial.get('HOME'), os.environ.get('HOME'))
+        observed = json.loads(result.stdout)
+        self.assertTrue(Path(observed['directory']).is_relative_to(REPO / '.runtime/tmp'))
+        self.assertEqual(observed['cache'], str(REPO / '.runtime/cache/pip'))
+        self.assertEqual(observed['bytecode'], '1')
+        self.assertFalse(Path(observed['directory']).exists())
+
+
+class DiagnosticDispatchTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.root = Path(self.stack.enter_context(TemporaryDirectory()))
+        self.runs = self.root / "runs"
+        self.directory = self.runs / "blocked"
+        (self.directory / "parity").mkdir(parents=True)
+        self.initial = self.root / "checkpoint.safetensors"
+        self.initial.write_bytes(b"fake-7205")
+        self.assets = {}
+        for name in ("base", "tokenizer", "history_replay", "history_template"):
+            path = self.root / name
+            path.write_text(name)
+            self.assets[name] = (path, h.file_record(path, relative_to=self.root))
+        self.config, self.original = {"id": "fixture"}, {"assets": "fixture"}
+        self.origin = {"step": 7205, "checkpoint": h.file_record(self.initial, relative_to=self.root)}
+        code = []
+        for name in ("history_parity.py", "model.py", "private_runtime.py", "cluster"):
+            path = self.root / name
+            path.write_text(name)
+            code.append(h.file_record(path, relative_to=self.root))
+        self.manifest = {"config": self.config, "original": self.original, "origin": self.origin,
+                         "assets": deepcopy({key: value[1] for key, value in self.assets.items()}),
+                         "runtime": {"gpu": "fake"}, "code": {"files": code}}
+        self.manifest["assets"]["initial_checkpoint"] = h.file_record(self.initial, relative_to=self.root)
+        self.write("experiment.json", self.manifest)
+        self.account = {"identity_sha256": h.digest(self.manifest), "maximum_updates": h.MAX_UPDATES,
+                        "charged_updates": 0, "maximum_seconds": h.MAX_SECONDS, "elapsed_seconds": 25.0,
+                        "inflight": None, "stages": [{"name": "official-parity", "seconds": 25.0,
+                                                       "interrupted": True}]}
+        self.write("budget.json", self.account)
+        binding = {name: self.manifest["assets"][key] for name, key in (
+            ("checkpoint", "initial_checkpoint"), ("base", "base"), ("tokenizer", "tokenizer"),
+            ("probes", "history_replay"), ("native_template", "history_template"))}
+        binding.update(implementation=code[0], runtime=code[1], reference_version=parity.REFERENCE_VERSION,
+                       tolerances=parity.TOLERANCES)
+        self.failure = {"passed": False, "binding": binding, "error": "AssertionError", "message": "boundary-513"}
+        self.write("parity/parity-failed.json", self.failure)
+        self.args = SimpleNamespace(runs=self.runs, run_id="blocked", source_run_id="completed")
+        self.runner = SimpleNamespace(four_gpu_identity=lambda: self.manifest["runtime"],
+                                      require_run_space=lambda *args: None)
+        self.calls = []
+        self.status = "DIAGNOSTIC_COMPLETE"
+        self.stack.enter_context(patch.object(h, "ROOT", self.root))
+        real_contained = h.contained
+        self.stack.enter_context(patch.object(h, "contained", lambda path, parent=None:
+                                              real_contained(path, parent or self.root)))
+        self.stack.enter_context(patch.object(h, "load", lambda runner:
+                                              (deepcopy(self.config), deepcopy(self.original), dict(self.assets))))
+        self.stack.enter_context(patch.object(h, "source_checkpoint", lambda *args: (self.initial, self.origin)))
+        self.stack.enter_context(patch.object(h, "code_record", lambda root, paths:
+                                              {"files": [h.file_record(root / p, relative_to=root) for p in paths]}))
+        self.stack.enter_context(patch.object(parity, "diagnose", self.diagnose, create=True))
+        self.stack.enter_context(redirect_stdout(io.StringIO()))
+
+    def tearDown(self):
+        self.stack.close()
+
+    def write(self, name, value):
+        (self.directory / name).write_text(json.dumps(value))
+
+    def diagnose(self, assets, checkpoint, destination, deadline, budget):
+        self.calls.append(destination)
+        self.assertEqual(checkpoint, self.initial)
+        self.assertEqual(budget.account["record"]["inflight"]["name"], "diagnose-parity")
+        with self.assertRaises(RuntimeError):
+            with h.execution_lease(self.runs):
+                pass
+        return {"status": self.status}
+
+    def test_success_preserves_failed_evidence_and_budget(self):
+        preserved = {name: (self.directory / name).read_bytes()
+                     for name in ("experiment.json", "parity/parity-failed.json")}
+        h.diagnose_parity(self.args, self.runner)
+        account = h.read(self.directory / "budget.json")
+        self.assertEqual(account["identity_sha256"], self.account["identity_sha256"])
+        self.assertEqual(account["charged_updates"], 0)
+        self.assertGreaterEqual(account["elapsed_seconds"], 25)
+        self.assertEqual([p["name"] for p in account["stages"]], ["official-parity", "diagnose-parity"])
+        self.assertIsNone(account["inflight"])
+        self.assertEqual(h.read(self.calls[0] / "budget-after.json"), account)
+        self.assertFalse(h.read(self.calls[0] / "context.json")["training_allowed"])
+        for name, before in preserved.items():
+            self.assertEqual((self.directory / name).read_bytes(), before)
+
+    def test_repeated_diagnostic_has_unique_directory_and_accumulates_time(self):
+        h.diagnose_parity(self.args, self.runner)
+        first = h.read(self.directory / "budget.json")["elapsed_seconds"]
+        h.diagnose_parity(self.args, self.runner)
+        self.assertNotEqual(self.calls[0], self.calls[1])
+        account = h.read(self.directory / "budget.json")
+        self.assertGreaterEqual(account["elapsed_seconds"], first)
+        self.assertEqual(len(account["stages"]), 3)
+
+    def test_incomplete_is_charged_and_not_promoted(self):
+        self.status = "DIAGNOSTIC_INCOMPLETE"
+        with self.assertRaisesRegex(RuntimeError, "remains blocked"):
+            h.diagnose_parity(self.args, self.runner)
+        self.assertEqual(h.read(self.directory / "budget.json")["stages"][-1]["name"], "diagnose-parity")
+        self.assertFalse((self.directory / "result.json").exists())
+        self.assertFalse((self.directory / "parity/parity.json").exists())
+
+    def test_changed_old_failure_binding_rejected_before_budget_mutation(self):
+        self.failure["binding"]["runtime"] = {"path": "model.py", "sha256": "changed", "bytes": 0}
+        self.write("parity/parity-failed.json", self.failure)
+        self.assert_rejected("frozen input and code")
+
+    def test_missing_failure_cannot_initialize_new_experiment(self):
+        (self.directory / "parity/parity-failed.json").unlink()
+        self.assert_rejected("boundary-513")
+
+    def test_budget_identity_change_rejected(self):
+        self.account["identity_sha256"] = "wrong"
+        self.write("budget.json", self.account)
+        self.assert_rejected("does not match")
+
+    def test_consumed_training_updates_rejected(self):
+        self.account["charged_updates"] = 1
+        self.write("budget.json", self.account)
+        self.assert_rejected("pre-training")
+
+    def test_later_stage_rejected(self):
+        (self.directory / "collection").mkdir()
+        self.assert_rejected("Later experiment stages")
+
+    def test_revised_tolerance_rejected(self):
+        self.failure["binding"]["tolerances"] = {}
+        self.write("parity/parity-failed.json", self.failure)
+        self.assert_rejected("original reference version and parity tolerances")
+
+    def test_changed_assets_rejected(self):
+        self.manifest["assets"]["base"]["sha256"] = "changed"
+        self.write("experiment.json", self.manifest)
+        self.account["identity_sha256"] = h.digest(self.manifest)
+        self.write("budget.json", self.account)
+        self.assert_rejected("checkpoint, data, or protocol")
+
+    def assert_rejected(self, message):
+        before = (self.directory / "budget.json").read_bytes()
+        with self.assertRaisesRegex(ValueError, message):
+            h.diagnose_parity(self.args, self.runner)
+        self.assertEqual(self.calls, [])
+        self.assertEqual((self.directory / "budget.json").read_bytes(), before)
 
 
 class Clock:
@@ -192,11 +415,12 @@ class GateTests(unittest.TestCase):
         baseline['score']['raw_results'] = 'large-raw-content' * 10000
         result = {'status': 'inconclusive', 'baseline': baseline, 'pairs': [], 'selection': None}
         stream = io.StringIO()
+        report = REPO / '.runtime/tmp/history-test-result.json'
         with redirect_stdout(stream):
-            h.print_summary(result, Path('/tmp/history-test-result.json'))
+            h.print_summary(result, report)
         self.assertLess(len(stream.getvalue()), 1000)
         self.assertNotIn('large-raw-content', stream.getvalue())
-        self.assertIn('/tmp/history-test-result.json', stream.getvalue())
+        self.assertIn(str(report), stream.getvalue())
 
 
 class BridgeTests(unittest.TestCase):

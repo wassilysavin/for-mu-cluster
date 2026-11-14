@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from private_runtime import configure_private_runtime
+
+configure_private_runtime()
+
 from collections.abc import Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from hashlib import file_digest, sha256

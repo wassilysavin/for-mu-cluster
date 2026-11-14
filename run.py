@@ -1,5 +1,9 @@
 """Train, evaluate, and inspect frozen GEM-pRF cluster experiments."""
 
+from private_runtime import configure_private_runtime
+
+configure_private_runtime()
+
 import argparse
 from contextlib import ExitStack
 from hashlib import sha256
@@ -259,7 +263,8 @@ def runtime_identity():
 
 
 def run_identity(experiment_id, config, experiment, assets, train_record, *, runtime=None):
-    code = ["run.py", "model.py", "ledger.py", "evaluate.mjs", "requirements.txt", "experiments.json"]
+    code = ["run.py", "model.py", "ledger.py", "private_runtime.py", "cluster",
+            "evaluate.mjs", "requirements.txt", "experiments.json"]
     code.extend(path.relative_to(ROOT).as_posix() for path in (ROOT / "evaluation").glob("*.mjs"))
     suite = config.get("volume") or config.get("full")
     if suite:
@@ -1424,6 +1429,9 @@ def main():
     history.add_argument("--run-id", default="actual-history-v3-4gpu")
     history.add_argument("--source-run-id", default="full-train-v2-4gpu")
     history.add_argument("--hours", type=float, help="Frozen model-worker budget, at most 36 hours")
+    diagnosis = commands.add_parser("diagnose-parity", help="Diagnose the failed boundary-513 check without training")
+    diagnosis.add_argument("--run-id", default="actual-history-v3-4gpu")
+    diagnosis.add_argument("--source-run-id", default="full-train-v2-4gpu")
     training = commands.add_parser("train")
     evaluation = commands.add_parser("test")
     for command in (training, evaluation):
@@ -1444,6 +1452,9 @@ def main():
     elif args.command == "history":
         import history
         history.compare(args, sys.modules[__name__])
+    elif args.command == "diagnose-parity":
+        import history
+        history.diagnose_parity(args, sys.modules[__name__])
     elif args.command == "full":
         full_course(args)
     elif args.command == "compare":

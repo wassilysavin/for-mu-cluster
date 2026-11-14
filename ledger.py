@@ -1,5 +1,9 @@
 """Bind cluster runs and evaluations to immutable, reproducible inputs."""
 
+from private_runtime import configure_private_runtime
+
+configure_private_runtime()
+
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 import fcntl

@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec python -B -S "$(dirname "$0")/private_runtime.py" "$@"

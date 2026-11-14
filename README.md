@@ -13,6 +13,33 @@ This repository contains frozen experiment definitions and a runner for Function
 | `evaluate.mjs`, `evaluation/` | Development scoring against actual conversation history. |
 | `assets/` | Base weights, tokenizer, starting checkpoint, frozen datasets, and evaluator contracts. |
 | `runs/` | Local results, checkpoints, and observations. Git ignores this folder. |
+| `cluster`, `private_runtime.py` | Launch commands with temporary files and dependency caches confined to `.runtime/` in this checkout. |
+
+## Private temporary files
+
+Keep this checkout inside your personal directory, for example `vsavin/for-mu-cluster`. Use `./cluster` before Python, pip, Node or new tmux commands:
+
+```sh
+./cluster
+./cluster python test_history.py
+./cluster python -m pip install -r requirements.txt
+```
+
+The launcher overrides inherited temporary/cache settings before the child process starts. Default Python and Node temporary directories use `.runtime/tmp`; pip, PyTorch, Triton, CUDA and Hugging Face caches use `.runtime/cache`. Atomic checkpoint and receipt staging remains beside the destination inside `runs/`. New tmux sessions use the explicit short socket `.runtime/tmux`. Python bytecode writes are disabled. Scratch directories must be real directories owned by your user and not writable by others; symlinks are rejected. Tests remove only their newly created temporary directories. Existing external caches are neither moved nor deleted. `HOME` and system settings are not changed.
+
+Python entry points also configure these paths, but the launcher is required to cover interpreter startup, pip and other child tools. This configures this workflow; it is not an operating-system sandbox for arbitrary commands. `.runtime/` is excluded from Git.
+
+## Current failed preflight: boundary-513
+
+If your existing run stopped with `AssertionError: boundary-513`, training has not started. After updating this branch, run:
+
+```sh
+./cluster python test_history.py
+./cluster python run.py --suite history check
+./cluster python run.py diagnose-parity --run-id actual-history-v3-4gpu
+```
+
+The diagnostic reports numerical differences and attention backends without an optimizer update. It preserves the failed parity receipt, uses the same execution lease, and charges its time to the original budget. It neither marks parity as passed nor permits training. Do not delete the failed run, reset its budget, or restart it under a new ID. A corrected, explicitly versioned continuation will be needed after the actual cause is established.
 
 ## Current experiment: actual-history-v3
 
@@ -24,14 +51,14 @@ From this repository, inside your existing environment and tmux session:
 git fetch origin
 git switch actual-history-v3
 git pull --ff-only
-git lfs pull
-python -m pip install -r requirements.txt
-python test_history.py
-python run.py --suite history check
-python -u run.py history --gpus 4
+./cluster git lfs pull
+./cluster python -m pip install -r requirements.txt
+./cluster python test_history.py
+./cluster python run.py --suite history check
+./cluster python -u run.py history --gpus 4
 ```
 
-If you are already inside tmux, run the command there. Otherwise create a session with `tmux new -s gemprf-history` first. After a disconnect, reconnect using `tmux attach -t gemprf-history`. If the process stopped, repeat **the same** `python -u run.py history --gpus 4` command with this checkout unchanged. One repository lease prevents duplicate model jobs.
+If you are already inside tmux, run the command there. Otherwise create a private session with `./cluster tmux new -s gemprf-history` first. Reconnect to that session using `./cluster tmux attach -t gemprf-history`; earlier sessions created without the launcher still use their original socket. For an ordinary interruption, repeat **the same** `./cluster python -u run.py history --gpus 4` command with this checkout unchanged. Numerical parity failures require diagnosis as described above. One repository lease prevents duplicate model jobs.
 
 The run performs these stages automatically:
 
@@ -66,14 +93,14 @@ Results stay under `runs/actual-history-v3-4gpu/`; individual training arms use 
 Use Linux x86-64, Python 3.13, Node.js 22 or later, Git LFS, and a V100 allocation.
 
 ```sh
-git lfs install
-git clone https://github.com/wassilysavin/for-mu-cluster.git
+git clone --branch actual-history-v3 https://github.com/wassilysavin/for-mu-cluster.git
 cd for-mu-cluster
-git lfs pull
-python -m venv .venv
+./cluster python -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
-python run.py check
+./cluster git lfs install --local
+./cluster git lfs pull
+./cluster python -m pip install -r requirements.txt
+./cluster python run.py check
 ```
 
 The repository attributes use Git LFS for weights and TRAIN. Use and distribution of the Gemma weights and derivatives are subject to the restrictions in section 3.2 of the bundled [Gemma Terms of Use](GEMMA-TERMS.md). The model changes are listed in [NOTICE](NOTICE).

@@ -11,7 +11,7 @@ import struct
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
-from time import monotonic, time
+from time import monotonic, time, time_ns
 from types import SimpleNamespace
 
 from ledger import SAFE_ID, code_record, execution_lease, file_record, publish_json, read_result
@@ -266,7 +266,7 @@ def validate_prepared(prepared, directory, runner):
 
 
 def make_identities(runner, original, config, assets, schedules, runtime, receipt, prepared):
-    paths = ["run.py", "history.py", "history_prepare.py", "history_parity.py", "model.py", "ledger.py",
+    paths = ["run.py", "history.py", "history_prepare.py", "history_parity.py", "model.py", "ledger.py", "private_runtime.py", "cluster",
              "evaluate.mjs", "evaluate-actual.mjs", "evaluate-known.mjs", "requirements.txt", "experiments.json", "experiments-history.json"]
     paths.extend(str(path.relative_to(ROOT)) for path in sorted((ROOT / "evaluation").rglob("*.mjs")))
     paths.extend(config.get("code_files", []))
@@ -834,6 +834,92 @@ def print_summary(result, path):
     print(f"Report: {Path(path).resolve()}", flush=True)
 
 
+def diagnostic_context(args, runner):
+    directory = contained(args.runs / args.run_id, args.runs)
+    manifest_path, budget_path = directory / "experiment.json", directory / "budget.json"
+    manifest, account = read(manifest_path), read(budget_path)
+    binding = digest(manifest)
+    if account.get("identity_sha256") != binding or account.get("maximum_updates") != MAX_UPDATES:
+        raise ValueError("The failed experiment's existing budget does not match its manifest")
+    elapsed, maximum = account.get("elapsed_seconds"), account.get("maximum_seconds")
+    if (account.get("charged_updates") != 0 or not isinstance(elapsed, (int, float))
+            or not math.isfinite(elapsed) or elapsed < 0 or not isinstance(maximum, (int, float))
+            or not math.isfinite(maximum) or not 0 < maximum <= MAX_SECONDS):
+        raise ValueError("Parity diagnosis requires an intact pre-training time and update budget")
+    phases = account.get("stages", []) + ([account["inflight"]] if account.get("inflight") else [])
+    if any(phase.get("name") not in ("official-parity", "diagnose-parity") for phase in phases):
+        raise ValueError("Parity diagnosis is restricted to the failed pre-training experiment")
+    if (any((directory / name).exists() for name in ("result.json", "collection", "parity/parity.json"))
+            or ((directory / "stages").exists() and any((directory / "stages").iterdir()))):
+        raise ValueError("Later experiment stages exist; diagnosis will not modify their budget")
+    config, original, assets = load(runner)
+    initial, receipt = source_checkpoint(args.runs, args.source_run_id, assets)
+    assets["initial_checkpoint"] = (initial, file_record(initial, relative_to=ROOT))
+    if (manifest.get("config") != config or manifest.get("original") != original
+            or manifest.get("origin") != receipt
+            or manifest.get("assets") != {key: value[1] for key, value in assets.items()}):
+        raise ValueError("The original checkpoint, data, or protocol changed after the failed parity check")
+    old_code = {record["path"]: record for record in manifest["code"]["files"]}
+    def local_record(record):
+        return dict(record, path=Path(record["path"]).name)
+    expected = {name: local_record(manifest["assets"][key]) for name, key in (
+        ("checkpoint", "initial_checkpoint"), ("base", "base"), ("tokenizer", "tokenizer"),
+        ("probes", "history_replay"), ("native_template", "history_template"))}
+    expected.update(implementation=local_record(old_code["history_parity.py"]),
+                    runtime=local_record(old_code["model.py"]))
+    failures = []
+    for path in sorted((directory / "parity").glob("parity-failed*.json")):
+        failure = read(path)
+        if failure.get("passed") is not False or any(failure.get("binding", {}).get(key) != value
+                                                    for key, value in expected.items()):
+            raise ValueError("The original parity failure differs from its frozen input and code bindings")
+        failures.append((path, failure))
+    if not any(failure.get("error") == "AssertionError" and failure.get("message") == "boundary-513"
+               for _, failure in failures):
+        raise ValueError("An existing boundary-513 failure receipt is required for this diagnosis")
+    return directory, manifest, account, assets, initial, failures
+
+
+def diagnose_parity(args, runner):
+    import history_parity
+    if not SAFE_ID.fullmatch(args.run_id) or len(args.run_id) > 70:
+        raise ValueError("History run ID must be a safe name of at most 70 characters")
+    args.runs = contained(args.runs)
+    with execution_lease(args.runs):
+        directory, manifest, account, assets, initial, failures = diagnostic_context(args, runner)
+        for _, failure in failures:
+            old = failure["binding"]
+            if old.get("reference_version") != history_parity.REFERENCE_VERSION or old.get("tolerances") != history_parity.TOLERANCES:
+                raise ValueError("The diagnostic must retain the original reference version and parity tolerances")
+        hardware = runner.four_gpu_identity()
+        if hardware != manifest["runtime"]:
+            raise ValueError("Use the failed experiment's original software and four-GPU allocation for diagnosis")
+        runner.require_run_space(args.runs, 32 * 1024 ** 2)
+        binding = digest(manifest)
+        budget = Budget(directory / "budget.json", binding, account["maximum_seconds"] / 3600)
+        budget.check()
+        destination = contained(directory / "diagnostics", directory)
+        destination.mkdir(exist_ok=True)
+        destination = contained(destination / f"parity-{time_ns()}", destination)
+        destination.mkdir()
+        files = {record["path"] for record in manifest["code"]["files"]} | {"private_runtime.py", "cluster"}
+        context = {"schema_version": 1, "purpose": "Diagnose failed parity without admitting or resuming training",
+                   "experiment_identity_sha256": binding,
+                   "original_manifest": file_record(directory / "experiment.json", relative_to=ROOT),
+                   "original_failures": [file_record(path, relative_to=ROOT) for path, _ in failures],
+                   "diagnostic_code": code_record(ROOT, sorted(files)), "runtime": hardware,
+                   "budget_before": read(directory / "budget.json"), "training_allowed": False}
+        publish_json(destination / "context.json", context)
+        with budget.phase("diagnose-parity") as deadline:
+            result = history_parity.diagnose({key: value[0] for key, value in assets.items()}, initial,
+                                            destination, deadline, budget)
+        publish_json(destination / "budget-after.json", budget.account["record"])
+        if result.get("status") != "DIAGNOSTIC_COMPLETE":
+            raise RuntimeError(f"Parity diagnosis incomplete; original training remains blocked. Report: {destination}")
+        print(f"Original training remains blocked; diagnostic time charged to the existing budget. Report: {destination}", flush=True)
+        return result
+
+
 def compare(args, runner):
     import history_parity
     import history_prepare
@@ -853,7 +939,7 @@ def compare(args, runner):
         if directory.exists() and any(directory.iterdir()) and not (directory / "experiment.json").is_file():
             raise ValueError("The output directory already belongs to another run; it will not be changed")
         directory.mkdir(exist_ok=True)
-        code_paths = ["run.py", "history.py", "history_prepare.py", "history_parity.py", "model.py", "ledger.py", "experiments.json",
+        code_paths = ["run.py", "history.py", "history_prepare.py", "history_parity.py", "model.py", "ledger.py", "private_runtime.py", "cluster", "experiments.json",
                       "evaluate-actual.mjs", "evaluate-known.mjs", "evaluate.mjs", "experiments-history.json", "requirements.txt"]
         code_paths.extend(str(path.relative_to(ROOT)) for path in sorted((ROOT / "evaluation").rglob("*.mjs")))
         code_paths.extend(config.get("code_files", []))
