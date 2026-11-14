@@ -1,6 +1,7 @@
 """CPU-only interruption and decision tests; no model is loaded."""
 
 from copy import deepcopy
+import errno
 import importlib.util
 import json
 import io
@@ -22,6 +23,143 @@ import history as h
 import history_parity as parity
 import history_prepare as prepare
 import private_runtime
+import ledger
+
+
+class PublicationLifetimeTests(unittest.TestCase):
+    def setUp(self):
+        self.stack = ExitStack()
+        self.root = Path(self.stack.enter_context(TemporaryDirectory()))
+        self.destination = self.root / 'result.json'
+        self.streams, self.events = {}, []
+        self.write_error = self.unlink_error = None
+        self.real_named = ledger.NamedTemporaryFile
+        self.real_link, self.real_unlink = ledger.os.link, Path.unlink
+        self.stack.enter_context(patch.object(ledger, 'NamedTemporaryFile', self.tracked_file))
+        self.stack.enter_context(patch.object(ledger.os, 'link', self.link_closed))
+        self.stack.enter_context(patch.object(Path, 'unlink', lambda path, *args, **kwargs:
+                                               self.unlink_closed(path, *args, **kwargs)))
+
+    def tearDown(self):
+        self.stack.close()
+
+    def tracked_file(self, *args, **kwargs):
+        owner, stream = self, self.real_named(*args, **kwargs)
+        self.streams[Path(stream.name)] = stream
+
+        class Stream:
+            def __enter__(self):
+                stream.__enter__()
+                return self
+
+            def __exit__(self, *error):
+                return stream.__exit__(*error)
+
+            def __getattr__(self, name):
+                return getattr(stream, name)
+
+            def write(self, data):
+                if owner.write_error is not None:
+                    raise owner.write_error
+                return stream.write(data)
+
+        return Stream()
+
+    def link_closed(self, source, destination, *args, **kwargs):
+        source = Path(source)
+        if source in self.streams:
+            self.assertTrue(self.streams[source].closed, 'Publication linked an open temporary stream')
+            self.events.append('link')
+        return self.real_link(source, destination, *args, **kwargs)
+
+    def unlink_closed(self, path, *args, **kwargs):
+        path = Path(path)
+        if path in self.streams:
+            if not self.streams[path].closed:
+                raise OSError(errno.ENOTEMPTY, 'Simulated NFS open-file cleanup failure', str(path))
+            self.events.append('unlink')
+            if self.unlink_error is not None:
+                raise self.unlink_error
+        return self.real_unlink(path, *args, **kwargs)
+
+    def assert_closed_and_only(self, *names):
+        self.assertTrue(all(stream.closed for stream in self.streams.values()))
+        self.assertEqual(sorted(path.name for path in self.root.iterdir()), sorted(names))
+
+    def test_atomic_publication_closes_before_link_and_unlink(self):
+        ledger.publish_json(self.destination, {'status': 'ready'})
+        self.assertEqual(json.loads(self.destination.read_text()), {'status': 'ready'})
+        self.assertEqual(self.events, ['link', 'unlink'])
+        self.assert_closed_and_only('result.json')
+
+    def test_write_failure_closes_and_removes_only_own_temporary(self):
+        (self.root / 'existing.txt').write_text('keep')
+        failure = RuntimeError('write failed')
+        self.write_error = failure
+        with self.assertRaises(RuntimeError) as caught:
+            ledger.publish_json(self.destination, {'status': 'ready'})
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(self.events, ['unlink'])
+        self.assert_closed_and_only('existing.txt')
+        self.assertEqual((self.root / 'existing.txt').read_text(), 'keep')
+
+    def test_existing_destination_is_never_overwritten(self):
+        before = b'{"status":"original"}\n'
+        self.destination.write_bytes(before)
+        with self.assertRaises(FileExistsError):
+            ledger.publish_json(self.destination, {'status': 'replacement'})
+        self.assertEqual(self.destination.read_bytes(), before)
+        self.assertEqual(self.events, ['link', 'unlink'])
+        self.assert_closed_and_only('result.json')
+
+    def test_file_sync_failure_closes_before_cleanup(self):
+        failure = OSError(errno.EIO, 'file sync failed')
+        with patch.object(ledger.os, 'fsync', side_effect=failure), self.assertRaises(OSError) as caught:
+            ledger.publish_json(self.destination, {'status': 'ready'})
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(self.events, ['unlink'])
+        self.assert_closed_and_only()
+
+    def test_directory_sync_failure_preserves_published_destination(self):
+        failure = OSError(errno.EIO, 'directory sync failed')
+        with patch.object(ledger, '_sync_directory', side_effect=failure), self.assertRaises(OSError) as caught:
+            ledger.publish_json(self.destination, {'status': 'ready'})
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(json.loads(self.destination.read_text()), {'status': 'ready'})
+        self.assertEqual(self.events, ['link', 'unlink'])
+        self.assert_closed_and_only('result.json')
+
+    def test_cleanup_failure_is_reported_after_successful_publication(self):
+        failure = OSError(errno.ENOTEMPTY, 'cleanup failed')
+        self.unlink_error = failure
+        with self.assertRaises(OSError) as caught:
+            ledger.publish_json(self.destination, {'status': 'ready'})
+        self.assertIs(caught.exception, failure)
+        self.assertTrue(all(stream.closed for stream in self.streams.values()))
+        self.assertEqual(json.loads(self.destination.read_text()), {'status': 'ready'})
+        self.assertEqual(self.events, ['link', 'unlink'])
+
+    def test_cleanup_error_does_not_mask_original_write_error(self):
+        failure = RuntimeError('original write failure')
+        self.write_error = failure
+        self.unlink_error = OSError(errno.ENOTEMPTY, 'secondary cleanup failure')
+        with self.assertRaises(RuntimeError) as caught:
+            ledger.publish_json(self.destination, {'status': 'ready'})
+        self.assertIs(caught.exception, failure)
+        self.assertTrue(any('cleanup' in note for note in caught.exception.__notes__))
+        self.assertTrue(all(stream.closed for stream in self.streams.values()))
+        self.assertFalse(self.destination.exists())
+
+    def test_creation_failure_does_not_remove_existing_files(self):
+        self.destination.write_text('preserve')
+        failure = OSError(errno.ENOSPC, 'cannot create staging file')
+        with patch.object(ledger, 'NamedTemporaryFile', side_effect=failure), self.assertRaises(OSError) as caught:
+            ledger.publish_json(self.destination, {'status': 'ready'})
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(self.events, [])
+        self.assert_closed_and_only('result.json')
+        self.assertEqual(self.destination.read_text(), 'preserve')
+
 
 
 class PrivateRuntimeTests(unittest.TestCase):
@@ -625,6 +763,323 @@ class RopeRevisionTests(unittest.TestCase):
         self.assertEqual(gate.call_args.kwargs, {"reference_policy": "math-chunked-v1"})
         manifest = h.read(f.runs / "fresh/experiment.json")
         self.assertEqual(manifest["reference_policy"], parity.reference_policy_record("math-chunked-v1"))
+
+
+class CheckpointIORecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = RopeRevisionTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.f.tearDown)
+        self.f = self.fixture.f
+        ledger = self.f.root / "ledger.py"
+        ledger.write_text("original atomic receipt")
+        self.fixture.current["code"]["files"].append(h.file_record(ledger, relative_to=self.f.root))
+        self.rope = self.fixture.revision()
+        self.rope_directory, self.rope_manifest = self.rope[:2]
+        self.rope_bytes = (self.rope_directory / "experiment.json").read_bytes()
+        budget = h.Budget(self.rope[2], self.rope[3], self.rope[4])
+        try:
+            with budget.phase("rope-alignment-v1/official-parity"):
+                raise OSError("fixture cleanup failed")
+        except OSError:
+            pass
+        self.before_budget = h.read(self.rope[2])
+        self.parity_directory = self.rope_directory / "parity"
+        self.parity_directory.mkdir()
+        self.failure_path = self.parity_directory / "parity-failed.json"
+        code = {row["path"]: row for row in self.rope_manifest["code"]["files"]}
+        binding = {name: self.rope_manifest["assets"][key] for name, key in (
+            ("checkpoint", "initial_checkpoint"), ("base", "base"), ("tokenizer", "tokenizer"),
+            ("probes", "history_replay"), ("native_template", "history_template"))}
+        binding.update(implementation=code["history_parity.py"], runtime=code["model.py"],
+                       reference_version=parity.REFERENCE_VERSION,
+                       reference_policy=parity.reference_policy_record(h.REFERENCE_POLICY), tolerances=parity.TOLERANCES)
+        self.probes = [{"case_id": "train-friday-dialogue-020-turn-5"}, {"case_id": "tn-r-be28005914909558e6"}]
+        labels = h.reference_control_labels() | {f"complete-prompt:{row['case_id']}" for row in self.probes}
+        labels.update(f"{kind}-{index}" for kind in ("cached-reference", "custom-cache", "reference-cache") for index in range(8))
+        self.gradients = {f"gradient-{index}" for index in range(252)}
+        checks = []
+        for kind, entries in (("logits", labels), ("loss", {"supervised-target-loss"}), ("gradient", self.gradients)):
+            checks.extend({"label": label, "within_tolerance": True, "nonfinite_count": 0,
+                           "mismatch_count": 0, **parity.TOLERANCES[kind]} for label in sorted(entries))
+        exact = {f"rope-{kind}-inverse-frequencies" for kind in ("local", "global")}
+        exact.update(f"rope-{kind}-rotation-{offset}" for kind in ("local", "global")
+                     for offset in (0, 511, 512, 513, 1025, 12743, 23024, 32765))
+        checks.extend({"label": label, "exact": True} for label in sorted(exact))
+        checks.extend({"label": f"native-envelope:{row['case_id']}", "exact_render": True,
+                       "exact_token_ids": True} for row in self.probes)
+        self.failure = {"passed": False, "error": "OSError", "binding": binding, "completed_checks": checks,
+                        "message": f"[Errno 39] Directory not empty: {str(self.parity_directory / 'tmpfixture')!r}",
+                        "mismatch": None}
+        h.publish_json(self.failure_path, self.failure)
+        self.failure_bytes = self.failure_path.read_bytes()
+        self.current = deepcopy(self.fixture.current)
+        (self.f.root / "model.py").write_text("canonical CPU reciprocal frequencies with owned checkpoint storage")
+        ledger.write_text("close temporary receipt before link and unlink")
+        self.current["code"]["files"] = [h.file_record(self.f.root / row["path"], relative_to=self.f.root)
+                                          if row["path"] in ("model.py", "ledger.py") else row
+                                          for row in self.current["code"]["files"]]
+        self.f.stack.enter_context(patch.object(parity, "selected_probes", return_value=self.probes))
+        self.f.stack.enter_context(patch.object(h, "checkpoint_header", return_value={f"lora.{name}": {} for name in self.gradients}))
+
+    def recovery(self):
+        return h.reference_revision(self.f.args, self.f.runner, self.current, parity)
+
+    def rewrite_failure(self):
+        h.replace_json(self.failure_path, self.failure)
+
+    def test_nested_recovery_preserves_chain_and_math_identity(self):
+        directory, manifest, budget_path, binding, hours, job = self.recovery()
+        self.assertEqual(directory, self.rope_directory / "recovery/checkpoint-io-v1")
+        self.assertEqual(budget_path, self.f.directory / "budget.json")
+        self.assertEqual(binding, h.digest(self.f.manifest))
+        self.assertEqual(hours, 36)
+        self.assertEqual(job.run_id, "blocked-rope-alignment-v1-checkpoint-io-v1")
+        revision, old = manifest["revision"], self.rope_manifest["revision"]
+        self.assertEqual(revision["runtime_numerics"], old["runtime_numerics"])
+        self.assertEqual(revision["budget_at_revision"], self.before_budget)
+        operation = revision["io_recovery"]
+        self.assertEqual(operation["parent_identity_sha256"], h.digest(self.rope_manifest))
+        self.assertEqual({row["path"] for row in operation["code_changes"]}, {"model.py", "ledger.py"})
+        self.assertFalse(operation["prior_checkpoint_reload_accepted"])
+        self.assertTrue(operation["full_gate_required"])
+        self.assertFalse((directory / "budget.json").exists())
+        self.assertEqual((self.rope_directory / "experiment.json").read_bytes(), self.rope_bytes)
+        self.assertEqual(self.failure_path.read_bytes(), self.failure_bytes)
+        self.assertEqual((self.fixture.first_directory / "experiment.json").read_bytes(), self.fixture.first_bytes)
+
+    def test_recovery_resumes_after_training_with_same_budget(self):
+        original = self.recovery()
+        budget = h.Budget(original[2], original[3], original[4])
+        budget.claim_updates(8)
+        with budget.phase("rope-alignment-v1/checkpoint-io-v1/pilot"):
+            pass
+        repeated = self.recovery()
+        self.assertEqual(repeated[:5], original[:5])
+        self.assertEqual(h.read(repeated[2])["charged_updates"], 8)
+
+    def test_numerical_failure_cannot_be_hidden_by_later_io(self):
+        numerical = deepcopy(self.failure)
+        numerical.update(error="TensorMismatch", mismatch={"label": "some-numerical-failure"})
+        h.publish_json(self.parity_directory / "parity-failed-older.json", numerical)
+        with self.assertRaisesRegex(ValueError, "numerical failures cannot be bypassed"):
+            self.recovery()
+
+    def test_rejects_different_io_error(self):
+        self.failure["message"] = "[Errno 5] Input/output error"
+        self.rewrite_failure()
+        with self.assertRaisesRegex(ValueError, "ENOTEMPTY"):
+            self.recovery()
+
+    def test_rejects_cleanup_outside_parity_scratch(self):
+        self.failure["message"] = f"[Errno 39] Directory not empty: {str(self.f.root / 'tmpelsewhere')!r}"
+        self.rewrite_failure()
+        with self.assertRaisesRegex(ValueError, "ENOTEMPTY"):
+            self.recovery()
+
+    def test_rejects_missing_gradient_check(self):
+        self.failure["completed_checks"] = [row for row in self.failure["completed_checks"] if row["label"] != "gradient-0"]
+        self.rewrite_failure()
+        with self.assertRaisesRegex(ValueError, "complete strict logits, loss, and gradient"):
+            self.recovery()
+
+    def test_rejects_missing_full_prompt_check(self):
+        self.failure["completed_checks"] = [row for row in self.failure["completed_checks"]
+                                            if row["label"] != "complete-prompt:train-friday-dialogue-020-turn-5"]
+        self.rewrite_failure()
+        with self.assertRaisesRegex(ValueError, "complete strict logits, loss, and gradient"):
+            self.recovery()
+
+    def test_rejects_wrong_binding(self):
+        self.failure["binding"]["runtime"] = {"path": "model.py", "sha256": "wrong", "bytes": 0}
+        self.rewrite_failure()
+        with self.assertRaisesRegex(ValueError, "Every preserved RoPE failure"):
+            self.recovery()
+
+    def test_rejects_already_passed_gate(self):
+        h.publish_json(self.parity_directory / "parity.json", {"passed": True})
+        with self.assertRaisesRegex(ValueError, "already passed parity"):
+            self.recovery()
+
+    def test_rejects_training_started(self):
+        value = deepcopy(self.before_budget)
+        value["charged_updates"] = 1
+        self.f.write("budget.json", value)
+        with self.assertRaisesRegex(ValueError, "pre-training"):
+            self.recovery()
+
+    def test_rejects_unrelated_code_change(self):
+        next(row for row in self.current["code"]["files"] if row["path"] == "private_runtime.py")["sha256"] = "different"
+        with self.assertRaisesRegex(ValueError, "declared I/O implementation"):
+            self.recovery()
+
+    def test_recovery_code_is_frozen(self):
+        self.recovery()
+        self.current["code"]["files"][0]["sha256"] = "different"
+        with self.assertRaisesRegex(ValueError, "Frozen record changed"):
+            self.recovery()
+
+    def test_budget_rollback_rejected_on_recovery_resume(self):
+        self.recovery()
+        value = deepcopy(self.before_budget)
+        value["elapsed_seconds"] = 0
+        self.f.write("budget.json", value)
+        with self.assertRaisesRegex(ValueError, "rolled back"):
+            self.recovery()
+
+    def test_recovery_gate_failure_still_blocks_collection(self):
+        with patch.object(h, "code_record", return_value=self.current["code"]), \
+             patch.object(h.subprocess, "run"), patch.object(prepare, "check"), \
+             patch.object(parity, "verify", side_effect=RuntimeError("fresh strict gate failed")), \
+             patch.object(prepare, "prepare") as collection:
+            with self.assertRaisesRegex(RuntimeError, "fresh strict gate failed"):
+                h.compare(self.f.args, self.f.runner)
+        collection.assert_not_called()
+        account = h.read(self.f.directory / "budget.json")
+        self.assertEqual(account["charged_updates"], 0)
+        self.assertEqual(account["stages"][-1]["name"], "rope-alignment-v1/checkpoint-io-v1/official-parity")
+        self.assertGreaterEqual(account["elapsed_seconds"], self.before_budget["elapsed_seconds"])
+        self.assertEqual(self.failure_path.read_bytes(), self.failure_bytes)
+
+    def test_recovery_full_gate_pass_precedes_collection(self):
+        with patch.object(h, "code_record", return_value=self.current["code"]), \
+             patch.object(h.subprocess, "run"), patch.object(prepare, "check"), \
+             patch.object(parity, "verify", return_value={"passed": True}), \
+             patch.object(prepare, "prepare", side_effect=RuntimeError("stop at collection")) as collection:
+            with self.assertRaisesRegex(RuntimeError, "stop at collection"):
+                h.compare(self.f.args, self.f.runner)
+        collection.assert_called_once()
+        path = self.rope_directory / "recovery/checkpoint-io-v1/stages/official-parity.json"
+        self.assertTrue(h.read(path)["result"]["passed"])
+        self.assertFalse((self.parity_directory / "parity.json").exists())
+
+
+
+class CheckpointOwnershipTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import private_runtime
+        private_runtime.configure_private_runtime()
+        try:
+            import torch
+            from safetensors import safe_open
+        except ImportError as error:
+            raise unittest.SkipTest('Checkpoint ownership controls require torch and safetensors') from error
+        import model
+        import history_parity
+        cls.torch, cls.model, cls.parity = torch, model, history_parity
+        cls.safe_open = staticmethod(safe_open)
+
+    def setUp(self):
+        from contextlib import ExitStack, contextmanager
+        from types import MethodType, SimpleNamespace
+        import weakref
+
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.raw_refs, self.raw_addresses = [], {}
+        self.stack.enter_context(patch.object(self.model, 'adapter_shapes', lambda: {'probe': (2, 3)}))
+        self.stack.enter_context(patch.object(self.model, 'checkpoint_origin', lambda metadata: {'step': 4847}))
+        owner = self
+
+        @contextmanager
+        def tracked_reader(*args, **kwargs):
+            with owner.safe_open(*args, **kwargs) as source:
+                class Reader:
+                    def __getattr__(self, name):
+                        return getattr(source, name)
+
+                    def get_tensor(self, key):
+                        value = source.get_tensor(key)
+                        owner.raw_refs.append(weakref.ref(value))
+                        owner.raw_addresses[key] = value.data_ptr()
+                        return value
+                yield Reader()
+
+        self.stack.enter_context(patch.object(self.model, 'safe_open', tracked_reader))
+        self.runtime = SimpleNamespace(
+            step=7205, lineage={'fixture': 'owned-storage'}, _metadata={},
+            parameters={'probe': self.torch.arange(6, dtype=self.torch.float32).reshape(2, 3).requires_grad_()},
+            rows={'probe': self.torch.tensor([1., 2.])}, cols={'probe': self.torch.tensor([3., 4., 5.])})
+        self.runtime.save_checkpoint = MethodType(self.model.Runtime.save_checkpoint, self.runtime)
+        self.path = self.root / 'fixture.safetensors'
+        self.runtime.save_checkpoint(self.path, lineage=self.runtime.lineage)
+
+    def test_cpu_read_owns_storage_and_preserves_exact_values(self):
+        before = self.path.read_bytes()
+        loaded = self.model.read_checkpoint(self.path, self.torch.device('cpu'))
+        self.assertEqual(loaded[2:4], (self.runtime.step, self.runtime.lineage))
+        for field, prefix, table in zip(('parameters', 'rows', 'cols'), ('lora', 'adafactor.row', 'adafactor.col'), loaded[4:]):
+            actual = table['probe']
+            self.assertTrue(self.torch.equal(actual, getattr(self.runtime, field)['probe']))
+            self.assertNotEqual(actual.data_ptr(), self.raw_addresses[f'{prefix}.probe'])
+            self.assertEqual(actual.requires_grad, field == 'parameters')
+        self.assertTrue(all(reference() is None for reference in self.raw_refs))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_validation_exception_releases_views_with_traceback_retained(self):
+        with patch.object(self.model, 'tensor_digest', lambda value: 'invalid-digest'):
+            try:
+                self.model.read_checkpoint(self.path, self.torch.device('cpu'))
+            except ValueError as error:
+                retained = error
+            else:
+                self.fail('Invalid checkpoint tensor was accepted')
+        self.assertIsNotNone(retained.__traceback__)
+        self.assertIn('Invalid checkpoint tensor', str(retained))
+        self.assertTrue(all(reference() is None for reference in self.raw_refs))
+
+    def test_reload_releases_views_before_successful_cleanup(self):
+        owner, paths = self, []
+
+        class CleanupGuard:
+            def __init__(self, *args, **kwargs):
+                self.temporary = TemporaryDirectory(*args, **kwargs)
+                self.name = self.temporary.name
+                paths.append(Path(self.name))
+
+            def cleanup(self):
+                owner.assertTrue(all(reference() is None for reference in owner.raw_refs))
+                self.temporary.cleanup()
+
+        with patch.object(self.parity, 'TemporaryDirectory', CleanupGuard):
+            self.parity.verify_checkpoint_reload(self.runtime, self.root)
+        self.assertTrue(paths)
+        self.assertTrue(all(not path.exists() for path in paths))
+
+    def test_cleanup_error_blocks_success_without_masking_comparison_error(self):
+        import errno
+        original_read = self.model.read_checkpoint
+
+        class FailingCleanup:
+            def __init__(self, *args, **kwargs):
+                self.temporary = TemporaryDirectory(*args, **kwargs)
+                self.name = self.temporary.name
+
+            def cleanup(self):
+                self.temporary.cleanup()
+                raise OSError(errno.ENOTEMPTY, 'Injected cleanup failure', self.name)
+
+        with patch.object(self.parity, 'TemporaryDirectory', FailingCleanup):
+            with self.assertRaises(OSError) as cleanup:
+                self.parity.verify_checkpoint_reload(self.runtime, self.root)
+            self.assertEqual(cleanup.exception.errno, errno.ENOTEMPTY)
+            self.assertEqual(cleanup.exception.parity_stage, 'checkpoint-reload-cleanup')
+
+            def wrong_cursor(*args, **kwargs):
+                result = list(original_read(*args, **kwargs))
+                result[2] += 1
+                return tuple(result)
+
+            with patch.object(self.model, 'read_checkpoint', wrong_cursor), self.assertRaises(AssertionError) as primary:
+                self.parity.verify_checkpoint_reload(self.runtime, self.root)
+            self.assertIn('cursor or lineage differs', str(primary.exception))
+            self.assertEqual(primary.exception.parity_stage, 'checkpoint-reload-compare')
+            self.assertEqual(primary.exception.cleanup_error['errno'], errno.ENOTEMPTY)
+
 
 
 class Clock:

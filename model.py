@@ -185,7 +185,8 @@ def read_checkpoint(path: Path, device: torch.device):
                 ("adafactor.col", shape[1:], cols),
             ):
                 key = f"{prefix}.{name}"
-                value = source.get_tensor(key)
+                # Own the storage before validation, including its exception paths.
+                value = source.get_tensor(key).clone()
                 if (value.dtype != torch.float32 or value.shape != expected_shape
                         or tensor_digest(value) != digests[key] or not torch.isfinite(value).all()
                         or (prefix != "lora" and not (value > 0).all())):

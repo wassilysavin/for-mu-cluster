@@ -70,16 +70,26 @@ def _sync_directory(directory):
 
 
 def publish_json(path, value):
-    with NamedTemporaryFile(dir=path.parent, delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
+    temporary = failure = None
+    try:
+        with NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
             stream.write(_json_bytes(value) + b"\n")
             stream.flush()
             os.fsync(stream.fileno())
-            os.link(temporary, path)
-            _sync_directory(path.parent)
-        finally:
-            temporary.unlink()
+        os.link(temporary, path)
+        _sync_directory(path.parent)
+    except BaseException as error:
+        failure = error
+        raise
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError as error:
+                if failure is None:
+                    raise
+                failure.add_note(f"Temporary publication cleanup also failed: {error}")
 
 
 def _repair_partial_event(path):

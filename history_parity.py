@@ -106,6 +106,43 @@ def require_complete_native_call(token_ids):
         raise AssertionError("Complete native generation did not reach the function-response boundary")
 
 
+def verify_checkpoint_reload(runtime, directory):
+    import torch
+    import model
+
+    temporary = failure = None
+    stage = "checkpoint-reload-prepare"
+    try:
+        temporary = TemporaryDirectory(dir=directory)
+        saved = Path(temporary.name) / "reload.safetensors"
+        stage = "checkpoint-reload-save"
+        runtime.save_checkpoint(saved, lineage=runtime.lineage)
+        stage = "checkpoint-reload-read"
+        _, _, step, lineage, parameters, rows, cols = model.read_checkpoint(saved, torch.device("cpu"))
+        stage = "checkpoint-reload-compare"
+        if step != runtime.step or lineage != runtime.lineage:
+            raise AssertionError("Checkpoint reload cursor or lineage differs")
+        for field, restored in (("parameters", parameters), ("rows", rows), ("cols", cols)):
+            for name, value in getattr(runtime, field).items():
+                torch.testing.assert_close(value.cpu(), restored[name], rtol=0, atol=0)
+    except BaseException as error:
+        failure = error
+        error.parity_stage = stage
+        raise
+    finally:
+        if temporary is not None:
+            try:
+                temporary.cleanup()
+            except Exception as cleanup_error:
+                cleanup_error.parity_stage = "checkpoint-reload-cleanup"
+                if failure is None:
+                    raise
+                failure.cleanup_error = {"error": type(cleanup_error).__name__, "message": str(cleanup_error),
+                                         "errno": getattr(cleanup_error, "errno", None),
+                                         "stage": "checkpoint-reload-cleanup"}
+                failure.add_note(f"Checkpoint cleanup also failed: {cleanup_error}")
+
+
 def official_model(runtime):
     import torch
     from torch import nn
@@ -695,15 +732,8 @@ def verify(assets, checkpoint, directory, deadline, budget, *, reference_policy=
             parameter.grad = None
             adapters[name].grad = None
         check_time()
-        with TemporaryDirectory(dir=directory) as temporary:
-            saved = Path(temporary) / "reload.safetensors"
-            runtime.save_checkpoint(saved, lineage=runtime.lineage)
-            _, _, step, lineage, parameters, rows, cols = model.read_checkpoint(saved, torch.device("cpu"))
-            if step != runtime.step or lineage != runtime.lineage:
-                raise AssertionError("Checkpoint reload cursor or lineage differs")
-            for field, restored in (("parameters", parameters), ("rows", rows), ("cols", cols)):
-                for name, value in getattr(runtime, field).items():
-                    torch.testing.assert_close(value.cpu(), restored[name], rtol=0, atol=0)
+        verify_checkpoint_reload(runtime, directory)
+        checks.append({"label": "checkpoint-reload-and-cleanup", "exact": True, "temporary_cleanup": True})
         result = {"schema_version": 1, "passed": True, "binding": binding, "checks": checks,
                   "seconds": time() - started, "checkpoint_reload_exact": True,
                   "cached_greedy_tokens": custom_generated,
@@ -720,6 +750,8 @@ def verify(assets, checkpoint, directory, deadline, budget, *, reference_policy=
             failure = directory / f"parity-failed-{time_ns()}.json"
         publish_json(failure, {"passed": False, "binding": binding, "completed_checks": checks,
                                "error": type(error).__name__, "message": str(error),
+                               "errno": getattr(error, "errno", None), "failure_stage": getattr(error, "parity_stage", None),
+                               "cleanup_error": getattr(error, "cleanup_error", None),
                                "mismatch": getattr(error, "diagnostics", None),
                                "supplemental_layer_diagnostics": getattr(error, "layer_diagnostics", None),
                                "seconds": time() - started})

@@ -1430,7 +1430,7 @@ def main():
     history.add_argument("--source-run-id", default="full-train-v2-4gpu")
     history.add_argument("--hours", type=float, help="Frozen model-worker budget, at most 36 hours")
     history.add_argument("--repair-parity", action="store_true",
-                         help="Continue the failed MATH-reference preflight with canonical RoPE alignment and the original shared budget")
+                         help="Continue the preserved preflight through canonical RoPE and checkpoint I/O recovery using the original shared budget")
     diagnosis = commands.add_parser("diagnose-parity", help="Diagnose the failed boundary-513 check without training")
     diagnosis.add_argument("--run-id", default="actual-history-v3-4gpu")
     diagnosis.add_argument("--source-run-id", default="full-train-v2-4gpu")

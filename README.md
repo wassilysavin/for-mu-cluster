@@ -29,27 +29,28 @@ The launcher overrides inherited temporary/cache settings before the child proce
 
 Python entry points also configure these paths, but the launcher is required to cover interpreter startup, pip and other child tools. This configures this workflow; it is not an operating-system sandbox for arbitrary commands. `.runtime/` is excluded from Git.
 
-## Runtime correction after the long-prompt parity failure
+## Checkpoint cleanup recovery
 
-The V100 run passed all short dense-MATH/chunked-MATH controls, including the previously failing 513-token boundary. It then stopped on the complete 23,027-token prompt: 15 of 262,144 logits exceeded the unchanged tolerance, although the first predicted token matched. Training and TRAIN-history collection had not started.
+The latest V100 run passed the exact RoPE controls, short dense/chunked MATH controls and both complete native generations (48 and 43 tokens). It then stopped while cleaning the temporary checkpoint-reload directory with `Errno 39: Directory not empty`. Training and TRAIN-history collection had not started; no complete parity PASS receipt was published.
 
-A component-level check found a specific numerical difference in RoPE. Our runtime recomputed `base**(-exponent)` on the GPU; the pinned official model initialized `1 / base**exponent` on the CPU. Their FP32 rounding differs and the phase error grows with token position. This release initializes the canonical CPU frequencies once per runtime and copies them to that replica's device. Attention, normalization, weights, optimizer and tolerances are unchanged. This corrects a demonstrated operation mismatch; the complete V100 gate must still establish whether it removes the observed logit failure.
+The checkpoint reader returned CPU tensors sharing the safetensors file mapping. Those tensors could keep the temporary file open after its reader context exited, preventing cleanup on NFS. The reader now copies tensors into owned memory before validation. JSON publication also closes its temporary file before linking or unlinking it. Cleanup failures cannot replace an earlier validation error. These are resource-lifetime corrections; model calculations, weights, optimizer, data and tolerances are unchanged.
 
 Inside the same checkout, active environment and existing tmux session:
 
 ```sh
-git pull --ff-only
-./cluster python test_history.py
+git pull --ff-only &&
 ./cluster python -u run.py history --gpus 4 --repair-parity
 ```
 
-This fixed correction creates `rope-alignment-v1` only after validating the saved pre-training failure in `math-reference-v1`, its frozen code and inputs, and the original evidence chain. Both earlier manifests and failures remain intact. The new manifest records the old and new runtime code. All revisions share the original budget and execution lease; spent time is retained and budget rollback or `--hours` overrides are rejected. This is an explicit correction, not an automatic retry with progressively relaxed criteria.
+The fixed `checkpoint-io-v1` recovery validates the stored cleanup failure and frozen `rope-alignment-v1` evidence before creating its own manifest. A recorded numerical failure, existing parity PASS or started training blocks this recovery. All earlier manifests, failures and checkpoints remain intact. The recovery records the old and new source hashes and shares the original budget and execution lease. Spent time is retained; budget rollback and `--hours` overrides are rejected.
 
 The official reference continues to use MATH, its own DynamicCache and prefill chunks of at most 256 tokens without dropping prompt tokens. The gate checks canonical RoPE components at long positions, repeats short dense/chunked controls and full-prompt logits, compares complete native calls for both the median and longest prompts, and checks loss, gradients and checkpoint reload. The 7205 baseline and both training arms will be evaluated using the same corrected runtime. The existing four-GPU pilot remains mandatory before training.
 
-A new numerical mismatch blocks training and retains its failure report. If time remains, a full-prompt mismatch also captures compact layer differences in the same process. For an ordinary interruption, repeat the same `./cluster python -u run.py history --gpus 4 --repair-parity` command without changing the checkout. Reports are under `runs/actual-history-v3-4gpu/revisions/rope-alignment-v1/`; the shared account remains the original `budget.json`.
+A new numerical mismatch blocks training and retains its failure report. If time remains, a full-prompt mismatch also captures compact layer differences in the same process. For an ordinary interruption, repeat the same command without changing the checkout. Recovery reports are under `runs/actual-history-v3-4gpu/revisions/rope-alignment-v1/recovery/checkpoint-io-v1/`; the shared account remains the original `budget.json`.
 
-The correction has local CPU component tests; it is not a claim that checkpoint 7205 has already passed the real V100 gate. Do not delete the failed run, reset its budget, or restart it under a new ID.
+The complete gate is repeated before collection and training. The cleanup correction has local regression tests; the complete recovered V100 run remains unverified. Do not delete the failed run, reset its budget, or restart it under a new ID. All temporary paths remain inside the personal checkout.
+
+The earlier RoPE correction remains: canonical CPU `1 / base**exponent` frequencies replace per-call GPU `base**(-exponent)`. Its previous long-prompt logit discrepancy no longer appeared in the latest V100 log. The original MATH and RoPE failure evidence is retained.
 
 ## Current experiment: actual-history-v3
 
@@ -68,7 +69,7 @@ git pull --ff-only
 ./cluster python -u run.py history --gpus 4
 ```
 
-If you are already inside tmux, run the command there. Otherwise create a private session with `./cluster tmux new -s gemprf-history` first. Reconnect to that session using `./cluster tmux attach -t gemprf-history`; earlier sessions created without the launcher still use their original socket. For an ordinary interruption, repeat **the same** `./cluster python -u run.py history --gpus 4` command with this checkout unchanged. The existing long-prompt failure requires the explicit revision above; other numerical failures require investigation. Fresh runs use the same corrected runtime and bounded MATH reference. One repository lease prevents duplicate model jobs.
+If you are already inside tmux, run the command there. Otherwise create a private session with `./cluster tmux new -s gemprf-history` first. Reconnect to that session using `./cluster tmux attach -t gemprf-history`; earlier sessions created without the launcher still use their original socket. For an ordinary interruption, repeat **the same** `./cluster python -u run.py history --gpus 4` command with this checkout unchanged. The existing cleanup failure requires the explicit recovery above; numerical failures require investigation. Fresh runs use the same corrected runtime and bounded MATH reference. One repository lease prevents duplicate model jobs.
 
 The run performs these stages automatically:
 

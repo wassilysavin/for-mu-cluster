@@ -1,12 +1,14 @@
 """Run the frozen actual-history experiment, preserving every completed stage."""
 
 from contextlib import contextmanager
+import ast
 from hashlib import sha256
 import json
 import math
 import os
 from pathlib import Path
 import random
+import re
 import struct
 import subprocess
 import sys
@@ -30,6 +32,7 @@ REFERENCE_REVISION = "rope-alignment-v1"
 REFERENCE_POLICY = "math-chunked-v1"
 PREVIOUS_REFERENCE_REVISION = "math-reference-v1"
 ROPE_NUMERICS = "canonical-cpu-rope-reciprocal-fp32-v1"
+CHECKPOINT_IO_RECOVERY = "checkpoint-io-v1"
 
 
 class BudgetLimit(RuntimeError):
@@ -988,6 +991,8 @@ def revision_evidence_records(revision):
     records = [revision["parent_manifest"], *revision["failures"], *revision["diagnostic_evidence"].values()]
     if revision.get("predecessor"):
         records += [revision["predecessor"]["manifest"], *revision["predecessor"]["failures"]]
+    if revision.get("io_recovery"):
+        records += [revision["io_recovery"]["parent_manifest"], *revision["io_recovery"]["failures"]]
     return records
 
 
@@ -996,6 +1001,16 @@ def require_budget_floor(account, snapshot):
             or account["charged_updates"] < snapshot["charged_updates"]
             or account["stages"][:len(snapshot["stages"])] != snapshot["stages"]):
         raise ValueError("The original budget was rolled back; the repair cannot reset spent work")
+
+
+def reference_control_labels():
+    required = {f"boundary-{length}" for length in (17, 511, 512, 513, 1025)}
+    for length in (17, 511, 512, 513, 1025):
+        required.update(f"reference-chunked-dense-{length}-positions-{first}:{min(first + 128, length)}"
+                        for first in range(0, length, 128))
+        required.update((f"reference-chunked-dense-cache-offset-{length}",
+                         f"reference-dense-cache-uncached-offset-{length}"))
+    return required
 
 
 def rope_revision(args, parent_directory, parent, account, current, parity):
@@ -1034,12 +1049,7 @@ def rope_revision(args, parent_directory, parent, account, current, parity):
     expected.update(implementation=basename(old_code["history_parity.py"]), runtime=basename(old_code["model.py"]),
                     reference_version=parity.REFERENCE_VERSION, reference_policy=parity.reference_policy_record(REFERENCE_POLICY),
                     tolerances=parity.TOLERANCES)
-    required = {f"boundary-{length}" for length in (17, 511, 512, 513, 1025)}
-    for length in (17, 511, 512, 513, 1025):
-        required.update(f"reference-chunked-dense-{length}-positions-{first}:{min(first + 128, length)}"
-                        for first in range(0, length, 128))
-        required.update((f"reference-chunked-dense-cache-offset-{length}",
-                         f"reference-dense-cache-uncached-offset-{length}"))
+    required = reference_control_labels()
     failures, observed = [], False
     for failure_path in sorted((directory / "parity").glob("parity-failed*.json")):
         failure = read(failure_path)
@@ -1079,6 +1089,97 @@ def rope_revision(args, parent_directory, parent, account, current, parity):
             "reason": "Align runtime RoPE frequency initialization with the canonical official CPU operation order; full strict parity remains required"}
 
 
+def checkpoint_io_revision(args, parent_directory, directory, account, stored, current, parity):
+    previous = stored["revision"]
+    if previous.get("id") != "rope-alignment-v1" or previous.get("io_recovery"):
+        raise ValueError("Checkpoint I/O recovery requires the original RoPE-alignment revision")
+    require_budget_floor(account, previous["budget_at_revision"])
+    for key in ("config", "original", "assets", "origin", "runtime", "reference_policy"):
+        if stored[key] != current[key]:
+            raise ValueError(f"Checkpoint I/O recovery cannot change the original {key}")
+    for record in revision_evidence_records(previous):
+        if file_record(contained(ROOT / record["path"], parent_directory), relative_to=ROOT) != record:
+            raise ValueError("The preserved RoPE-revision evidence changed")
+    allowed = {"official-parity", "diagnose-parity", f"{PREVIOUS_REFERENCE_REVISION}/official-parity",
+               "rope-alignment-v1/official-parity"}
+    phases = account["stages"] + ([account["inflight"]] if account.get("inflight") else [])
+    if account["charged_updates"] != 0 or any(phase.get("name") not in allowed for phase in phases):
+        raise ValueError("Checkpoint I/O recovery is restricted to the failed pre-training RoPE check")
+    if (any((directory / name).exists() for name in ("result.json", "collection", "identities.json", "token-budget.json",
+                                                    "evaluations", "parity/parity.json"))
+            or ((directory / "stages").exists() and any((directory / "stages").iterdir()))
+            or any(args.runs.glob(f"{args.run_id}-rope-alignment-v1-*"))):
+        raise ValueError("The RoPE revision already passed parity or started training or evaluation")
+    old_code = {row["path"]: row for row in stored["code"]["files"]}
+    new_code = {row["path"]: row for row in current["code"]["files"]}
+    changed = {name for name in old_code if old_code[name] != new_code.get(name)}
+    permitted = {"model.py", "history_parity.py", "ledger.py", "history.py", "run.py", "test_history.py"}
+    if (set(old_code) != set(new_code) or not changed <= permitted
+            or not changed.intersection({"model.py", "history_parity.py", "ledger.py"})):
+        raise ValueError("The operational recovery may only change the declared I/O implementation, orchestration, and tests")
+    def basename(record):
+        return dict(record, path=Path(record["path"]).name)
+    expected = {name: basename(stored["assets"][key]) for name, key in (
+        ("checkpoint", "initial_checkpoint"), ("base", "base"), ("tokenizer", "tokenizer"),
+        ("probes", "history_replay"), ("native_template", "history_template"))}
+    expected.update(implementation=basename(old_code["history_parity.py"]), runtime=basename(old_code["model.py"]),
+                    reference_version=parity.REFERENCE_VERSION, reference_policy=parity.reference_policy_record(REFERENCE_POLICY),
+                    tolerances=parity.TOLERANCES)
+    probes = parity.selected_probes(contained(ROOT / stored["assets"]["history_replay"]["path"]))
+    labels = {row["case_id"] for row in probes}
+    header = checkpoint_header(contained(ROOT / stored["assets"]["initial_checkpoint"]["path"]))
+    gradients = {name.removeprefix("lora.") for name in header if name.startswith("lora.")}
+    if len(labels) != 2 or len(gradients) != 252:
+        raise ValueError("Checkpoint I/O recovery requires both frozen full prompts and all 252 adapter gradients")
+    logits = reference_control_labels() | {f"complete-prompt:{label}" for label in labels}
+    logits.update(f"{kind}-{index}" for kind in ("cached-reference", "custom-cache", "reference-cache") for index in range(8))
+    exact = {f"rope-{kind}-inverse-frequencies" for kind in ("local", "global")}
+    exact.update(f"rope-{kind}-rotation-{offset}" for kind in ("local", "global")
+                 for offset in (0, 511, 512, 513, 1025, 12743, 23024, 32765))
+    failure_records = []
+    for path in sorted((directory / "parity").glob("parity-failed*.json")):
+        failure = read(path)
+        if (failure.get("passed") is not False or failure.get("binding") != expected
+                or failure.get("error") not in ("OSError", "IOError") or failure.get("mismatch") is not None):
+            raise ValueError("Every preserved RoPE failure must be an I/O cleanup failure; numerical failures cannot be bypassed")
+        message = re.fullmatch(r"\[Errno 39\] Directory not empty: (.+)", str(failure.get("message", "")))
+        try:
+            failed_path = ast.literal_eval(message.group(1)) if message else None
+            if not isinstance(failed_path, str) or not Path(failed_path).is_absolute():
+                raise ValueError("Expected an absolute checkpoint scratch path")
+            scratch = contained(failed_path, directory / "parity")
+            relative = scratch.relative_to((directory / "parity").resolve())
+            if len(relative.parts) != 1 or not relative.name.startswith("tmp"):
+                raise ValueError("Unexpected cleanup location")
+        except (ValueError, SyntaxError, TypeError) as error:
+            raise ValueError("Checkpoint I/O recovery requires ENOTEMPTY in this revision's parity scratch directory") from error
+        checks = {row.get("label"): row for row in failure.get("completed_checks", [])}
+        for kind, required in (("logits", logits), ("loss", {"supervised-target-loss"}), ("gradient", gradients)):
+            if not required <= checks.keys() or any(
+                    checks[label].get("within_tolerance") is not True or checks[label].get("nonfinite_count") != 0
+                    or checks[label].get("mismatch_count") != 0
+                    or any(checks[label].get(key) != value for key, value in parity.TOLERANCES[kind].items())
+                    for label in required):
+                raise ValueError("The failed cleanup must follow the complete strict logits, loss, and gradient checks")
+        if (not exact <= checks.keys() or any(checks[label].get("exact") is not True for label in exact)
+                or any(checks.get(f"native-envelope:{label}", {}).get("exact_render") is not True
+                       or checks.get(f"native-envelope:{label}", {}).get("exact_token_ids") is not True for label in labels)):
+            raise ValueError("The failed cleanup must preserve the exact native-template and RoPE checks")
+        failure_records.append(file_record(path, relative_to=ROOT))
+    if not failure_records or not any(phase.get("name") == "rope-alignment-v1/official-parity"
+                                      and phase.get("interrupted") is True for phase in account["stages"]):
+        raise ValueError("The preserved RoPE cleanup failure and its charged interrupted phase are required")
+    return {**previous, "budget_at_revision": account,
+            "io_recovery": {"id": CHECKPOINT_IO_RECOVERY, "parent_identity_sha256": digest(stored),
+                "parent_manifest": file_record(directory / "experiment.json", relative_to=ROOT), "failures": failure_records,
+                "code_changes": [{"path": name, "before": old_code[name], "after": new_code[name]} for name in sorted(changed)],
+                "model_before": old_code["model.py"], "model_after": new_code["model.py"],
+                "change": "Own CPU checkpoint tensor storage and close temporary receipt handles before unlink; preserve primary errors",
+                "numerical_policy_unchanged": True, "full_gate_required": True,
+                "prior_checkpoint_reload_accepted": False},
+            "reason": "Recover checkpoint resource lifetime and cleanup without changing numerical policy; rerun the entire strict gate"}
+
+
 def reference_revision(args, runner, current, parity):
     if args.hours is not None:
         raise ValueError("A parity repair retains the original budget; --hours cannot reset or change it")
@@ -1100,7 +1201,19 @@ def reference_revision(args, runner, current, parity):
             raise ValueError(f"Parity repair cannot change the original {key}")
     path = directory / "experiment.json"
     if path.exists():
-        revision = read(path)["revision"]
+        stored = read(path)
+        revision = stored["revision"]
+        recovery = contained(directory / "recovery" / CHECKPOINT_IO_RECOVERY, directory)
+        if REFERENCE_REVISION == "rope-alignment-v1" and (recovery / "experiment.json").exists():
+            directory, path = recovery, recovery / "experiment.json"
+            revision = read(path)["revision"]
+        elif (REFERENCE_REVISION == "rope-alignment-v1" and stored["code"] != current["code"]
+              and any((directory / "parity").glob("parity-failed*.json"))):
+            revision = checkpoint_io_revision(args, parent_directory, directory, account, stored, current, parity)
+            if recovery.exists() and any(recovery.iterdir()):
+                raise ValueError("The recovery directory contains unbound files; it will not be reused")
+            recovery.mkdir(parents=True, exist_ok=True)
+            directory, path = recovery, recovery / "experiment.json"
     elif REFERENCE_REVISION == "rope-alignment-v1":
         revision = rope_revision(args, parent_directory, parent, account, current, parity)
         if directory.exists() and any(directory.iterdir()):
@@ -1139,7 +1252,14 @@ def reference_revision(args, runner, current, parity):
     if REFERENCE_REVISION == "rope-alignment-v1":
         numerics = revision.get("runtime_numerics", {})
         models = {record["path"]: record for record in current["code"]["files"]}
-        if numerics.get("id") != ROPE_NUMERICS or numerics.get("new_model") != models["model.py"]:
+        expected_model = numerics.get("new_model")
+        if revision.get("io_recovery"):
+            recovery = revision["io_recovery"]
+            if (recovery.get("id") != CHECKPOINT_IO_RECOVERY or recovery.get("model_before") != expected_model
+                    or recovery.get("numerical_policy_unchanged") is not True or recovery.get("full_gate_required") is not True):
+                raise ValueError("The frozen checkpoint I/O recovery binding changed")
+            expected_model = recovery.get("model_after")
+        if numerics.get("id") != ROPE_NUMERICS or expected_model != models["model.py"]:
             raise ValueError("The frozen canonical RoPE runtime correction changed")
     for record in revision_evidence_records(revision):
         if file_record(contained(ROOT / record["path"], parent_directory), relative_to=ROOT) != record:
@@ -1148,6 +1268,8 @@ def reference_revision(args, runner, current, parity):
     immutable(path, manifest)
     worker_args = SimpleNamespace(**vars(args))
     worker_args.run_id = f"{args.run_id}-{REFERENCE_REVISION}"
+    if revision.get("io_recovery"):
+        worker_args.run_id += f"-{CHECKPOINT_IO_RECOVERY}"
     if len(f"{worker_args.run_id}-treatment-2718") > 100:
         raise ValueError("The run ID is too long for the explicit revision checkpoint names")
     return directory, manifest, parent_directory / "budget.json", parent_binding, account["maximum_seconds"] / 3600, worker_args
@@ -1186,7 +1308,8 @@ def compare(args, runner):
         if repair:
             directory, manifest, budget_path, budget_binding, budget_hours, worker_args = reference_revision(
                 args, runner, manifest, history_parity)
-            print(f"Reference revision {REFERENCE_REVISION}; original shared budget retained; full strict parity required.", flush=True)
+            recovery_note = f" / {CHECKPOINT_IO_RECOVERY}" if manifest["revision"].get("io_recovery") else ""
+            print(f"Reference revision {REFERENCE_REVISION}{recovery_note}; original shared budget retained; full strict parity required.", flush=True)
         immutable(directory / "experiment.json", manifest)
         binding = digest(manifest)
         def verify_inputs():
@@ -1216,8 +1339,11 @@ def compare(args, runner):
             print_summary(result, final)
             return result
         budget = Budget(budget_path, budget_binding, budget_hours)
+        phase_prefix = f"{REFERENCE_REVISION}/" if repair else ""
+        if repair and manifest["revision"].get("io_recovery"):
+            phase_prefix += f"{CHECKPOINT_IO_RECOVERY}/"
         stages = Stages(directory, binding, budget, verify=verify_inputs,
-                        phase_prefix=f"{REFERENCE_REVISION}/" if repair else "")
+                        phase_prefix=phase_prefix)
         runner.require_run_space(args.runs, EVALUATION_BYTES + 512 * 1024 ** 2)
         hook_assets["train"] = hook_assets["history_replay"]
         parity_dir = directory / "parity"
