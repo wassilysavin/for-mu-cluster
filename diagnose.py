@@ -6,6 +6,8 @@ configure_private_runtime()
 
 import argparse
 from collections import Counter, defaultdict
+from contextlib import contextmanager
+import fcntl
 from hashlib import sha256
 from importlib.metadata import version
 import json
@@ -19,13 +21,16 @@ from threading import Thread
 from time import monotonic, sleep
 
 import history
-from ledger import SAFE_ID, code_record, execution_lease, file_record, publish_json
+from ledger import SAFE_ID, code_record, execution_lease, file_record, publish_json as ledger_publish_json
 import reference_model
 
 ROOT = Path(__file__).resolve().parent
 RUN_ID = 'train-fit-reference-v1'
 RESERVE = 512 * 1024**2
-OUTPUT_ALLOWANCE = 3 * 1024**3
+DISK_LIMIT = 3_000_000_000
+AUXILIARY_ALLOWANCE = 64 * 1024**2
+PLANNED_OUTPUT_BYTES = 384 * 1024**2
+ACTIVE_BUDGET = None
 SEED = 1729
 SHARDS = 4
 PILOT_CASES = 32
@@ -61,12 +66,122 @@ def verify(entry):
 
 
 def directory(relative):
-    return private_directory(ROOT, relative)
+    if ACTIVE_BUDGET is None:
+        return private_directory(ROOT, relative)
+    with ACTIVE_BUDGET.writing(4096 * len(Path(relative).parts)):
+        return private_directory(ROOT, relative)
 
 
 def require_space(path, extra=0):
     if disk_usage(path).free < RESERVE + extra:
         raise RuntimeError(f'Need {(RESERVE + extra) / 1e9:.2f} GB free inside this checkout; no external folders are used')
+
+
+def allocation(path):
+    info = path.lstat()
+    return {'device': info.st_dev, 'inode': info.st_ino,
+            'bytes': max(info.st_size, getattr(info, 'st_blocks', 0) * 512)}
+
+
+def inventory(path):
+    if not path.exists():
+        return {}
+    found = {}
+    for parent, directories, files in os.walk(path, followlinks=False):
+        for name in ['.', *directories, *files]:
+            candidate = Path(parent) / name
+            if candidate.is_symlink():
+                history.contained(candidate, ROOT)
+            found[str(candidate.relative_to(ROOT))] = allocation(candidate)
+    return found
+
+
+class DiskBudget:
+    """Serialize diagnostic writes and charge cache growth without deletion credits."""
+
+    def __init__(self, output, *, create=False):
+        self.output = history.contained(output, ROOT)
+        self.path = self.output / 'disk-budget.json'
+        self.lock = history.contained(self.output / '.disk-budget.lock', ROOT)
+        self.cache_roots = tuple(reference_model.CACHE_ROOTS)
+        policy = {'limit_bytes': DISK_LIMIT, 'reserve_bytes': RESERVE,
+                  'auxiliary_allowance_bytes': AUXILIARY_ALLOWANCE,
+                  'cache_roots': list(self.cache_roots)}
+        if not self.path.exists():
+            if not create:
+                raise ValueError('Missing frozen diagnostic disk budget')
+            value = {'schema': 1, **policy, 'baseline': inventory(ROOT / '.runtime')}
+            require_space(output, len(canonical(value).encode()) + 65536)
+            ledger_publish_json(self.path, value)
+        value = read(self.path)
+        if value.get('schema') != 1 or any(value.get(key) != expected for key, expected in policy.items()):
+            raise ValueError('Diagnostic disk budget changed; do not reset it on resume')
+        self.baseline = value['baseline']
+
+    def usage(self):
+        entries = inventory(ROOT / '.runtime')
+        entries.update(inventory(self.output))
+        charged = {}
+        reference_entries = {}
+        output_relative = str(self.output.relative_to(ROOT)) + '/'
+        for name, entry in entries.items():
+            key = entry['device'], entry['inode']
+            reference = any(name == prefix or name.startswith(prefix + '/') for prefix in self.cache_roots)
+            full = reference or name == output_relative[:-1] or name.startswith(output_relative)
+            before = self.baseline.get(name, {})
+            same_inode = all(before.get(field) == entry[field] for field in ('device', 'inode'))
+            amount = entry['bytes'] if full or not same_inode else max(0, entry['bytes'] - before['bytes'])
+            charged[key] = max(charged.get(key, 0), amount)
+            if reference:
+                reference_entries[key] = entry['bytes']
+        full_bytes = sum(charged.values())
+        return {'controlled_and_cache_growth_bytes': full_bytes, 'reference_bytes': sum(reference_entries.values()),
+                'reserved_bytes': RESERVE + AUXILIARY_ALLOWANCE,
+                'charged_bytes': full_bytes + RESERVE + AUXILIARY_ALLOWANCE,
+                'limit_bytes': DISK_LIMIT}
+
+    @contextmanager
+    def writing(self, extra=0):
+        with self.lock.open('a+b') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            block = max(4096, os.statvfs(self.output).f_frsize)
+            growth = ((extra + block - 1) // block + 2) * block
+            used = self.usage()
+            if used['charged_bytes'] + growth > DISK_LIMIT:
+                raise RuntimeError('Diagnostic would exceed its 3 GB disk budget; saved results remain. No cases were dropped.')
+            require_space(self.output, growth)
+            yield used
+
+
+@contextmanager
+def guarded_write(path, extra):
+    if ACTIVE_BUDGET is None:
+        require_space(Path(path).parent, extra)
+        yield
+    else:
+        with ACTIVE_BUDGET.writing(extra):
+            yield
+
+
+def publish_json(path, value):
+    with guarded_write(path, len(canonical(value).encode()) + 65536):
+        ledger_publish_json(path, value)
+
+
+def publish_snapshot(path, value):
+    with guarded_write(path, len(canonical(value).encode()) + 65536), TemporaryDirectory(dir=path.parent) as temporary:
+        staged = Path(temporary) / path.name
+        ledger_publish_json(staged, value)
+        os.replace(staged, path)
+
+
+def immutable(path, value):
+    if path.exists():
+        if read(path) != value:
+            raise ValueError(f'Frozen record changed: {path}')
+    else:
+        publish_json(path, value)
+    return value
 
 
 def latest_source(runs, source_id):
@@ -271,19 +386,20 @@ def prepare_panel(source, output, registry):
     for name in ('control-1729', 'treatment-1729'):
         if sum(x['exposure'][name] > 0 for x in cases) != 2052 or sum(x['exposure'][name] for x in cases) != 3144:
             raise ValueError('TRAIN membership or exposure differs from the completed schedule')
-    info = {'schema': 1, 'binding': panel_binding(source), 'cases': len(cases), 'all_semantic_eligible': True,
+    info = {'schema': 2, 'binding': panel_binding(source), 'cases': len(cases), 'all_semantic_eligible': True,
+            'source_train': record(source['train']), 'tokenizer': source['manifest']['assets']['tokenizer'],
             'strata': dict(Counter(x['case']['source'] for x in cases)),
             'qualification_ids': qualification_ids(cases), 'context_sidecar': record(context_path),
             'context_provenance': record(ROOT / 'assets/diagnostic-train-contexts.json'),
             'baseline_fit_scope': '1572 replay members of earlier full-v2 TRAIN, not all 2977 original cases',
             'reference_is_not_trained_on_this_panel': True}
     path = output / 'train-panel.jsonl'
-    with TemporaryDirectory(dir=output) as temporary:
+    encoded = ''.join(canonical({**envelope, 'storage': 'frozen-train-prefix-v1',
+        'case': {key: value for key, value in envelope['case'].items() if key != 'prompt'}}) + '\n' for envelope in cases).encode()
+    with guarded_write(path, len(encoded)), TemporaryDirectory(dir=output) as temporary:
         staged = Path(temporary) / path.name
-        with staged.open('w') as stream:
-            for envelope in cases:
-                stream.write(canonical(envelope) + '\n')
-            stream.flush(); os.fsync(stream.fileno())
+        with staged.open('wb') as stream:
+            stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
         if path.exists():
             if file_record(staged)['sha256'] != record(path)['sha256']:
                 raise ValueError('Interrupted prepared panel differs from deterministic restoration')
@@ -294,10 +410,33 @@ def prepare_panel(source, output, registry):
     return info
 
 
+def panel_cases(info):
+    from tokenizers import Tokenizer
+    if info.get('schema') != 2:
+        raise ValueError('Expected a compact diagnostic TRAIN panel')
+    original = {row['case_id']: row for row in rows(verify(info['source_train']))}
+    tokenizer = Tokenizer.from_file(str(verify(info['tokenizer'])))
+    tokenizer.no_padding(); tokenizer.no_truncation()
+    cases = []
+    for envelope in rows(verify(info['file'])):
+        if envelope.pop('storage', None) != 'frozen-train-prefix-v1' or 'prompt' in envelope['case']:
+            raise ValueError('Diagnostic TRAIN prompt storage changed')
+        item = envelope['case']; row = original[item['case_id']]
+        prefix = row['input_ids'][:row['prompt_tokens']]
+        prompt = tokenizer.decode(prefix, skip_special_tokens=False)
+        if (sha256(prompt.encode()).hexdigest() != item['prompt_sha256']
+                or tokenizer.encode(prompt, add_special_tokens=False).ids != prefix):
+            raise ValueError('Restored TRAIN prompt differs from its original token sequence')
+        item['prompt'] = prompt
+        cases.append(envelope)
+    return cases
+
+
 def validate_panel(info, source):
-    if info.get('binding') != panel_binding(source):
+    if (info.get('binding') != panel_binding(source) or info.get('source_train') != record(source['train'])
+            or info.get('tokenizer') != source['manifest']['assets']['tokenizer']):
         raise ValueError('Prepared diagnostic panel belongs to different TRAIN or preparation code')
-    cases = list(rows(verify(info['file'])))
+    cases = panel_cases(info)
     original = {row['case_id']: row for row in rows(source['train'])}
     if len(cases) != 2532 or {x['case']['case_id'] for x in cases} != set(original):
         raise ValueError('Diagnostic panel changed its full TRAIN denominator')
@@ -336,17 +475,20 @@ def recover_jsonl(path):
             boundary = data.rfind(b'\n') + 1
             try:
                 json.loads(data[boundary:])
-                stream.seek(0, 2); stream.write(b'\n'); data += b'\n'
             except (ValueError, UnicodeDecodeError):
                 stream.seek(boundary); stream.truncate(); data = data[:boundary]
+            else:
+                with guarded_write(path, 1):
+                    stream.seek(0, 2); stream.write(b'\n'); stream.flush(); os.fsync(stream.fileno())
+                data += b'\n'
             stream.flush(); os.fsync(stream.fileno())
     return [json.loads(line) for line in data.splitlines()]
 
 
 def append_observation(stream, value):
     encoded = (canonical(value) + '\n').encode()
-    require_space(Path(stream.name).parent, len(encoded))
-    stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
+    with guarded_write(stream.name, len(encoded)):
+        stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
 
 
 def student_provider(checkpoint, assets, gpu):
@@ -384,7 +526,8 @@ def reference_provider(receipt, gpu):
                     'error': 'context_overflow', 'input_tokens': error.input_tokens,
                     'max_new_tokens': error.max_new_tokens, 'context_tokens': error.context_tokens,
                     'input_sha256': sha256(prompt.encode()).hexdigest()}
-        return {**result, 'provider_kind': 'reference', 'raw_ids': result['raw_token_ids'],
+        tokens = result.pop('raw_token_ids')
+        return {**result, 'provider_kind': 'reference', 'raw_ids': tokens,
                 'complete': result['finish_reason'] == 'complete_batch'}
     return runtime, generate
 
@@ -403,7 +546,7 @@ def train_worker(rpc, cases, path, generate, name, binding):
             generation = previous['generation'] if previous else generate(item['prompt'])
             if generation.get('diagnostic_worker_sha256') != binding:
                 raise ValueError('Saved generation belongs to a different checkpoint or diagnostic worker')
-            observation = rpc.request({'action': 'score', 'case': item, 'generation': generation}, 'score')['observation']
+            observation = rpc.request({'action': 'score', 'case': item, 'generation': generation, 'compact': True}, 'score')['observation']
             if previous:
                 if canonical(previous) != canonical(observation):
                     raise ValueError('Saved TRAIN result no longer reproduces')
@@ -415,10 +558,12 @@ def train_worker(rpc, cases, path, generate, name, binding):
 
 def dev_worker(manifest, path, gpu, generate, binding):
     path = history.contained(path, ROOT)
+    recover_jsonl(path)
     assets = manifest['source']['assets']
     command = ['node', str(ROOT / 'diagnose-dev.mjs'), str(ROOT / assets['registry']['path']),
-               str(ROOT / assets['history_dev']['path']), str(path), str(gpu), str(SHARDS), str(RESERVE), binding]
-    with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+               str(ROOT / assets['history_dev']['path']), str(path), str(gpu), str(SHARDS), str(RESERVE), binding,
+               '--relay-persist']
+    with path.open('ab') as observations, subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           text=True, encoding='utf-8', bufsize=1) as process:
         score = None
         try:
@@ -432,6 +577,13 @@ def dev_worker(manifest, path, gpu, generate, binding):
                     process.stdin.flush(); count += 1
                     if count == 1 or count % 25 == 0:
                         print(f'[reference GPU {gpu}] DEV {count} new cases', flush=True)
+                elif message['kind'] == 'persist' and score is None:
+                    observation = message['observation']
+                    if observation['generation'].get('diagnostic_worker_sha256') != binding:
+                        raise ValueError('DEV persistence request has a different worker binding')
+                    append_observation(observations, observation)
+                    process.stdin.write(canonical({'kind': 'persisted', 'case_id': observation['case_id']}) + '\n')
+                    process.stdin.flush()
                 else:
                     raise ValueError('Unexpected DEV bridge message')
             process.stdin.close()
@@ -442,6 +594,7 @@ def dev_worker(manifest, path, gpu, generate, binding):
 
 
 def worker(args):
+    global ACTIVE_BUDGET
     import run as runner
     runner.verify_worker_lease(ROOT / 'runs', args.lease_fd)
     if args.parent_fd is None:
@@ -451,6 +604,8 @@ def worker(args):
         os._exit(72)
     Thread(target=parent_watch, daemon=True).start()
     output = history.contained(ROOT / 'runs' / args.run_id)
+    ACTIVE_BUDGET = DiskBudget(output)
+    os.environ['CUDA_CACHE_DISABLE'] = '1'
     manifest = read(output / 'experiment.json')
     if history.digest(manifest) != read(output / 'manifest-binding.json')['sha256']:
         raise ValueError('Frozen diagnostic manifest changed')
@@ -458,14 +613,15 @@ def worker(args):
         raise ValueError('Worker is not in the frozen plan')
     if args.phase == 'qualification' and args.worker != 'reference':
         raise ValueError('Only reference transport admission has a qualification phase')
-    cases = [row for row in rows(verify(manifest['train_panel']['file']))
+    verify(manifest['disk_budget'])
+    cases = [row for row in panel_cases(manifest['train_panel'])
              if shard_for(row['case']['case_id']) == args.gpu]
     if args.phase == 'qualification':
         selected = set(manifest['train_panel']['qualification_ids'])
         cases = [row for row in cases if row['case']['case_id'] in selected]
     target = directory(f'runs/{args.run_id}/{args.worker}/{args.phase}')
     binding = worker_binding(manifest, args.worker, args.phase, args.gpu)
-    history.immutable(target / f'worker-{args.gpu}.json', {'binding': binding,
+    immutable(target / f'worker-{args.gpu}.json', {'binding': binding,
         'model': args.worker, 'phase': args.phase, 'gpu': args.gpu,
         'cases': [row['case']['case_id'] for row in cases]})
     if args.worker == 'reference':
@@ -476,8 +632,8 @@ def worker(args):
     provider_generate = generate
     def generate(prompt):
         return {**provider_generate(prompt), 'diagnostic_worker_sha256': binding}
-    ready = target / f'ready-{args.gpu}-{args.attempt}.json'
-    publish_json(ready, {'pid': os.getpid(), 'gpu': args.gpu})
+    ready = target / f'ready-{args.gpu}.json'
+    publish_snapshot(ready, {'pid': os.getpid(), 'gpu': args.gpu, 'attempt': args.attempt})
     registry = ROOT / manifest['source']['assets']['registry']['path']
     with NodeRPC('diagnose-data.mjs', registry) as rpc:
         train_worker(rpc, cases, target / f'train-{args.gpu}.jsonl', generate, f'{args.worker} GPU {args.gpu}', binding)
@@ -502,8 +658,8 @@ def launch(output, name, phase, lease):
                        '--parent-fd', str(read_fd), '--attempt', attempt]
             process = subprocess.Popen(command, pass_fds=(lease, read_fd))
             workers.append(process)
-            ready = target / f'ready-{gpu}-{attempt}.json'
-            while not ready.exists():
+            ready = target / f'ready-{gpu}.json'
+            while not ready.exists() or read(ready) != {'pid': process.pid, 'gpu': gpu, 'attempt': attempt}:
                 failures = [(index, child.poll()) for index, child in enumerate(workers)
                             if child.poll() is not None and child.returncode != 0]
                 if failures or process.poll() is not None:
@@ -555,7 +711,7 @@ def metrics(observations):
 
 
 def collect_train(output, manifest, name, phase):
-    cases = list(rows(verify(manifest['train_panel']['file'])))
+    cases = panel_cases(manifest['train_panel'])
     if phase == 'qualification':
         selected = set(manifest['train_panel']['qualification_ids'])
         cases = [row for row in cases if row['case']['case_id'] in selected]
@@ -608,7 +764,7 @@ def collect_dev(output, manifest):
     if destination.exists():
         if destination.read_text() != expected: raise ValueError('Merged DEV changed')
     else:
-        with TemporaryDirectory(dir=target) as temporary:
+        with guarded_write(destination, len(expected.encode())), TemporaryDirectory(dir=target) as temporary:
             staged = Path(temporary) / 'dev.jsonl'
             with staged.open('x') as stream:
                 stream.write(expected); stream.flush(); os.fsync(stream.fileno())
@@ -660,15 +816,17 @@ def validate_manifest(manifest, identity, source, output):
             or manifest.get('students') != source['students']
             or manifest.get('source') != {'assets': source['manifest']['assets'], 'config': source['manifest']['config']}
             or manifest.get('train_panel') != read(output / 'train-panel.json')
+            or manifest.get('disk_budget') != record(output / 'disk-budget.json')
             or manifest.get('no_training_performed') is not True
             or manifest.get('sealed_test_accessed') is not False):
         raise ValueError('Diagnostic manifest changed or belongs to another completed experiment')
     validate_panel(manifest['train_panel'], source)
     reference_model.validate_receipt(manifest['reference'])
-    history.immutable(output / 'manifest-binding.json', {'sha256': history.digest(manifest)})
+    immutable(output / 'manifest-binding.json', {'sha256': history.digest(manifest)})
 
 
 def compare(args):
+    global ACTIVE_BUDGET
     import run as runner
     if not SAFE_ID.fullmatch(args.run_id) or len(args.run_id) > 70:
         raise ValueError('Invalid diagnostic run ID')
@@ -680,34 +838,47 @@ def compare(args):
         hardware = runner.four_gpu_identity()
         if version('transformers') != '4.57.3' or version('huggingface-hub') != '0.36.2':
             raise RuntimeError('Use the unchanged pinned requirements.txt for this diagnostic')
+        reference_model.require_reference_dependencies()
+        ACTIVE_BUDGET = DiskBudget(output, create=True)
+        os.environ['CUDA_CACHE_DISABLE'] = '1'
         code_paths = BASE_CODE + NEW_CODE + [str(p.relative_to(ROOT)) for p in sorted((ROOT / 'evaluation').glob('*.mjs'))]
         identity = {'source_evidence': source['evidence'], 'code': code_record(ROOT, sorted(set(code_paths))),
-                    'hardware': hardware, 'dependencies': {name: version(name) for name in ('transformers', 'huggingface-hub')},
+                    'hardware': hardware, 'dependencies': {name: version(name) for name in ('transformers', 'huggingface-hub', *reference_model.REFERENCE_DEPENDENCIES)},
+                    'disk_budget': record(output / 'disk-budget.json'),
                     'contexts': [record(ROOT / 'assets' / name) for name in ('diagnostic-train-contexts.jsonl', 'diagnostic-train-contexts.json')],
                     'policy': {'seed': SEED, 'gpus': SHARDS, 'student_generation_cap': 512,
                                'reference_generation_cap': 2048, 'qualification_cases': PILOT_CASES,
                                'transport_minimum': PILOT_TRANSPORT_MINIMUM,
                                'model': reference_model.MODEL_ID, 'revision': reference_model.REVISION}}
-        history.immutable(output / 'identity.json', identity)
+        immutable(output / 'identity.json', identity)
         if (output / 'experiment.json').exists():
             manifest = read(output / 'experiment.json')
             validate_manifest(manifest, identity, source, output)
         else:
-            require_space(output, OUTPUT_ALLOWANCE)
+            remaining_model = reference_model.missing_download_bytes()
+            with ACTIVE_BUDGET.writing(remaining_model + PLANNED_OUTPUT_BYTES):
+                pass
             registry = ROOT / source['manifest']['assets']['registry']['path']
             panel_path = output / 'train-panel.json'
             panel = read(panel_path) if panel_path.exists() else prepare_panel(source, output, registry)
             validate_panel(panel, source)
-            print('Preparing one pinned Qwen3-8B snapshot inside .runtime; four GPU workers share these files.', flush=True)
-            reference = reference_model.prepare_reference(reserve_bytes=RESERVE + OUTPUT_ALLOWANCE)
-            require_space(output, OUTPUT_ALLOWANCE)
-            manifest = {'schema': 1, 'identity_sha256': history.digest(identity),
+            print('Preparing one pinned Qwen3-1.7B Q8_0 snapshot inside .runtime; four GPU workers share these files.', flush=True)
+            def admit_download(missing_bytes):
+                with ACTIVE_BUDGET.writing(missing_bytes + PLANNED_OUTPUT_BYTES):
+                    pass
+            reference = reference_model.prepare_reference(
+                reserve_bytes=RESERVE + PLANNED_OUTPUT_BYTES + AUXILIARY_ALLOWANCE,
+                admit_download=admit_download)
+            with ACTIVE_BUDGET.writing():
+                pass
+            manifest = {'schema': 2, 'identity_sha256': history.digest(identity),
                         'source': {'assets': source['manifest']['assets'], 'config': source['manifest']['config']},
                         'students': source['students'], 'train_panel': panel, 'reference': reference,
+                        'disk_budget': record(output / 'disk-budget.json'),
                         'no_training_performed': True, 'sealed_test_accessed': False,
                         'comparison_type': 'qualified reference recipe, not an architecture-only causal comparison or model ceiling'}
             publish_json(output / 'experiment.json', manifest)
-            history.immutable(output / 'manifest-binding.json', {'sha256': history.digest(manifest)})
+            immutable(output / 'manifest-binding.json', {'sha256': history.digest(manifest)})
         final = output / 'result.json'
         if final.exists():
             result = read(final)
@@ -727,9 +898,9 @@ def compare(args):
             admitted = qualify(output, manifest)
             publish_json(qualification, admitted)
         if not admitted['passed']:
-            raise RuntimeError(f'Reference transport admission failed. Inspect {qualification}; DEV was not opened to this reference. Do not infer a small-model ceiling.')
+            print(f'Reference transport admission failed: {qualification}. Student TRAIN fit will still run; reference DEV is withheld.', flush=True)
         measured = {}
-        for name in [*manifest['students'], 'reference']:
+        for name in [*manifest['students'], *(['reference'] if admitted['passed'] else [])]:
             completed = stages / f'{name}.json'
             if completed.exists():
                 value = read(completed)
@@ -750,15 +921,16 @@ def compare(args):
                          'train': train, 'dev': dev, 'dev_reused_from_authenticated_source': name != 'reference'}
                 publish_json(completed, value)
             measured[name] = value
-        reference_rows = list(rows(verify(measured['reference']['dev']['observations'])))
+        reference_rows = list(rows(verify(measured['reference']['dev']['observations']))) if 'reference' in measured else []
         paired = {name: paired_cells(list(rows(verify(value['dev']['observations']))), reference_rows)
-                  for name, value in measured.items() if name != 'reference'}
+                  for name, value in measured.items() if name != 'reference' and admitted['passed']}
         artifacts = [record(stages / f'{name}.json') for name in measured] + [record(qualification)]
-        artifacts += [record(output / name) for name in ('experiment.json', 'manifest-binding.json', 'train-panel.json', 'train-panel.jsonl')]
+        artifacts += [record(output / name) for name in ('experiment.json', 'manifest-binding.json', 'disk-budget.json', 'train-panel.json', 'train-panel.jsonl')]
         for value in measured.values():
             artifacts += value['train']['observations'] + [value['dev']['observations']]
         for entry in identity['source_evidence']: verify(entry)
-        result = {'status': 'COMPLETE_DIAGNOSTIC', 'identity_sha256': manifest['identity_sha256'],
+        result = {'status': 'COMPLETE_DIAGNOSTIC' if admitted['passed'] else 'TRAIN_FIT_COMPLETE_REFERENCE_NOT_QUALIFIED',
+                  'identity_sha256': manifest['identity_sha256'],
                   'reference_transport': admitted, 'models': measured, 'paired_supported_dev': paired,
                   'artifacts': artifacts, 'release_ready': False,
                   'interpretation': 'TRAIN fit measures consistency with frozen training labels, not independently established scientific truth. Own-history DEV uses each model actual outputs. Unresolved and critical cases cannot count as passes. Reference differences do not establish a model capacity ceiling.'}
@@ -780,6 +952,8 @@ def print_summary(result, path):
               f"DEV supported {dev['supported']['passed']}/{dev['supported']['planned']}; "
               f"dialogues {dev['whole_dialogues']['passed']}/{dev['whole_dialogues']['planned']}; "
               f"DEV critical {dev['critical_detected']}; unresolved {dev['critical_review_required']}", flush=True)
+    if not result['reference_transport']['passed']:
+        print('Reference format admission failed; no reference DEV comparison or small-model capacity conclusion is available.', flush=True)
     print(f'Report: {path}', flush=True)
 
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile, open, statfs } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
 import { createRegistry } from './evaluation/registry.mjs';
@@ -9,7 +9,7 @@ import { createSession, applyModelOutput, sessionHistory } from './evaluation/se
 import { encodeCalls } from './evaluation/functiongemma.mjs';
 import { buildModelInput, pinnedTokenizerSha256 } from './evaluation/model-input.mjs';
 import { createActualHistoryHarness, hash } from './evaluation/actual-history.mjs';
-import { materializeGeneration } from './diagnose-data.mjs';
+import { compactObservation, compactObservationSchema, materializeGeneration } from './diagnose-data.mjs';
 
 const api = { createSession, applyModelOutput, sessionHistory, encodeCalls, canonical };
 const harness = createActualHistoryHarness(api);
@@ -87,13 +87,45 @@ export function summarize(data, records) {
     review_status: 'automatic_conservative_unresolved_retained', release_ready: false };
 }
 
-async function evaluate(context, output, shard, count, reserve, binding) {
+async function fullObservation(context, row, before, resolved, prompt, generation) {
+  const after = await materializeGeneration(context.registry, before, resolved.question, generation);
+  const graded = await harness.grade(context.registry, row, before, after, resolved);
+  return { ...graded, bundle_sha256: context.bundleHash, prompt_sha256: hash(prompt),
+    before_visible_history_sha256: resolved.before_visible_history_sha256, question: resolved.question,
+    policy_branch: resolved.branch, expected_model_call_batches: resolved.allowed_batches,
+    generation, before, after };
+}
+
+export async function* expandRecords(context, records, { binding = null } = {}) {
+  const positions = new Map(context.plan.map((row, index) => [row.case_id, index]));
+  const sessions = new Map(), turns = new Map();
+  let previousPosition = -1;
+  for (const record of records) {
+    assert.equal(record.observation_schema, compactObservationSchema, 'Expected a compact diagnostic receipt');
+    const index = positions.get(record.case_id);
+    assert.ok(Number.isInteger(index) && index > previousPosition, 'DEV receipts contain an unknown, duplicate or reordered case');
+    previousPosition = index;
+    const row = context.plan[index];
+    const key = row.dialogue_id ? `${row.panel}:${row.dialogue_id}` : null;
+    if (key) assert.equal(row.turn_index, (turns.get(key) ?? 0) + 1, 'Replay requires the preceding dialogue receipts');
+    const before = (key && sessions.get(key)) || await harness.initial(context.registry, row);
+    const resolved = harness.resolve(row, before), prompt = await promptFor(context.registry, before, resolved.question);
+    assert.match(record.generation?.diagnostic_worker_sha256 ?? '', /^[a-f0-9]{64}$/);
+    if (binding !== null) assert.equal(record.generation.diagnostic_worker_sha256, binding, 'Receipt belongs to another provider');
+    const full = await fullObservation(context, row, before, resolved, prompt, record.generation);
+    assert.equal(canonical(compactObservation(full)), canonical(record), 'Compact DEV receipt does not reproduce');
+    if (key) { sessions.set(key, full.after); turns.set(key, row.turn_index); }
+    yield full;
+  }
+}
+
+async function evaluate(context, output, shard, count, reserve, binding, relayPersist = false) {
   const { registry, data, plan, bundleHash } = context;
   const selected = plan.filter(row => shardOf(row, count) === shard);
   const saved = await readSaved(output);
   assert.ok(saved.length <= selected.length, 'Extra saved DEV observations');
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
-  const replies = input[Symbol.asyncIterator](), handle = await open(output, 'a');
+  const replies = input[Symbol.asyncIterator](), handle = relayPersist ? null : await open(output, 'a');
   const sessions = new Map(), records = [];
   try {
     for (let index = 0; index < selected.length; index++) {
@@ -114,24 +146,27 @@ async function evaluate(context, output, shard, count, reserve, binding) {
         generation = JSON.parse(next.value);
       }
       assert.equal(generation.diagnostic_worker_sha256, binding, 'DEV generation belongs to a different provider or worker');
-      const after = await materializeGeneration(registry, before, resolved.question, generation);
-      const graded = await harness.grade(registry, row, before, after, resolved);
-      const record = { ...graded, bundle_sha256: bundleHash, prompt_sha256: hash(prompt),
-        before_visible_history_sha256: resolved.before_visible_history_sha256, question: resolved.question,
-        policy_branch: resolved.branch, expected_model_call_batches: resolved.allowed_batches,
-        generation, before, after };
+      const full = await fullObservation(context, row, before, resolved, prompt, generation);
+      const record = compactObservation(full);
       if (previous) assert.equal(canonical(previous), canonical(record), 'Saved DEV is not reproducible');
-      else {
+      else if (relayPersist) {
+        await emit({ kind: 'persist', observation: record });
+        const reply = await replies.next();
+        assert.equal(reply.done, false, 'Persistence coordinator disconnected before acknowledging the receipt');
+        const confirmation = JSON.parse(reply.value);
+        assert.equal(confirmation.kind, 'persisted');
+        assert.equal(confirmation.case_id, row.case_id);
+      } else {
         const bytes = Buffer.from(`${JSON.stringify(record)}\n`);
         const space = await statfs(dirname(output), { bigint: true });
         assert.ok(space.bavail * space.bsize >= BigInt(reserve) + BigInt(bytes.length), 'Private run disk reserve exhausted');
         await handle.write(bytes); await handle.datasync();
       }
-      if (row.dialogue_id) sessions.set(row.dialogue_id, after);
+      if (row.dialogue_id) sessions.set(row.dialogue_id, full.after);
       records.push(record);
     }
     await emit({ kind: 'result', score: { observed_records: records.length, shard, shards: count, bundle_sha256: bundleHash } });
-  } finally { input.close(); await handle.close(); }
+  } finally { input.close(); if (handle) await handle.close(); }
 }
 
 async function main() {
@@ -151,11 +186,29 @@ async function main() {
     await emit({ kind: 'result', score: summarize(context.data, records) });
     return;
   }
+  if (output === '--audit' || output === '--expand') {
+    const raw = await readFile(shardText, 'utf8');
+    const records = raw.trim() ? raw.trimEnd().split('\n').map(line => JSON.parse(line)) : [];
+    const selectedCase = process.argv[6] ?? null;
+    let count = 0, emitted = 0;
+    for await (const observation of expandRecords(context, records)) {
+      count++;
+      if (output === '--expand' && (selectedCase === null || observation.case_id === selectedCase)) {
+        await emit({ kind: 'expanded', observation }); emitted++;
+      }
+    }
+    if (output === '--expand' && selectedCase !== null) assert.equal(emitted, 1, 'Requested case is absent');
+    await emit({ kind: 'audit', observations: count, bundle_sha256: context.bundleHash,
+      model_inference_performed: false, independent_label_review_performed: false });
+    return;
+  }
   const shard = Number(shardText), count = Number(countText), reserve = Number(reserveText);
   assert.ok(Number.isInteger(shard) && count === 4 && shard >= 0 && shard < count);
   assert.ok(Number.isSafeInteger(reserve) && reserve >= 536870912);
   assert.match(binding ?? '', /^[a-f0-9]{64}$/);
-  await evaluate(context, output, shard, count, reserve, binding);
+  const relay = process.argv.slice(9);
+  assert.ok(relay.length === 0 || (relay.length === 1 && relay[0] === '--relay-persist'));
+  await evaluate(context, output, shard, count, reserve, binding, relay.length === 1);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await main();

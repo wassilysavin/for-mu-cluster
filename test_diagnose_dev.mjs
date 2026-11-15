@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createInterface } from 'node:readline';
 import test from 'node:test';
-import { loadPanel, shardOf, summarize } from './diagnose-dev.mjs';
-import { materializeGeneration } from './diagnose-data.mjs';
+import { expandRecords, loadPanel, shardOf, summarize } from './diagnose-dev.mjs';
+import { compactObservation, materializeGeneration } from './diagnose-data.mjs';
 import { canonical } from './evaluation/schema.mjs';
 import { createSession, applyModelOutput, sessionHistory } from './evaluation/session.mjs';
 import { encodeCalls } from './evaluation/functiongemma.mjs';
 import { buildModelInput, pinnedTokenizerSha256 } from './evaluation/model-input.mjs';
 import { renderPrompt } from './evaluation/history-train.mjs';
-import { createActualHistoryHarness } from './evaluation/actual-history.mjs';
+import { createActualHistoryHarness, hash } from './evaluation/actual-history.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const registryPath = join(root, 'assets/registry.json');
@@ -130,4 +132,118 @@ test('CLI plan is identical and summary rejects a reordered or incomplete merged
       { stdio: 'pipe' }));
     assert.ok((await readFile(output, 'utf8')).endsWith('\n'));
   } finally { await rm(directory, { recursive: true }); }
+});
+
+test('compact own-history DEV expands and audits complete dialogues with unchanged raw evidence', async () => {
+  const plan = context.data.panels.closed_loop.filter(row => row.dialogue_id === 'dev-ah3-loop-quote_displayed-01');
+  let before = await harness.initial(context.registry, plan[0]);
+  const full = [], compact = [], binding = 'b'.repeat(64);
+  for (const [index, row] of plan.entries()) {
+    const resolved = harness.resolve(row, before), prompt = await renderPrompt(context.registry, api, before, resolved.question);
+    const generation = index === 1 ? { provider_kind: 'reference', complete: false,
+      raw_text: 'unfinished', raw_ids: [420000], finish_reason: 'length', diagnostic_worker_sha256: binding } :
+      { provider_kind: 'reference', complete: true, raw_text: encodeCalls(resolved.allowed_batches[0]),
+        raw_ids: [420001], diagnostic_worker_sha256: binding };
+    const after = await materializeGeneration(context.registry, before, resolved.question, generation);
+    const graded = await harness.grade(context.registry, row, before, after, resolved);
+    const record = { ...graded, bundle_sha256: context.bundleHash, prompt_sha256: hash(prompt),
+      before_visible_history_sha256: resolved.before_visible_history_sha256, question: resolved.question,
+      policy_branch: resolved.branch, expected_model_call_batches: resolved.allowed_batches,
+      generation, before, after };
+    full.push(record); compact.push(compactObservation(record)); before = after;
+  }
+  const expanded = [];
+  for await (const row of expandRecords(context, compact, { binding })) expanded.push(row);
+  assert.deepEqual(expanded, full);
+  assert.deepEqual(summarize(context.data, compact), summarize(context.data, full));
+  assert.ok(JSON.stringify(compact).length < JSON.stringify(full).length);
+  assert.equal(compact[1].delivered.outcome, 'error');
+  assert.deepEqual(compact[1].generation.raw_ids, [420000]);
+  for (const mutate of [
+    rows => { rows[1].after_semantic_sha256 = '0'.repeat(64); },
+    rows => { rows[2].generation.raw_text = ''; },
+    rows => { rows.splice(0, 1); },
+    rows => { [rows[0], rows[1]] = [rows[1], rows[0]]; },
+  ]) {
+    const wrong = structuredClone(compact); mutate(wrong);
+    await assert.rejects(async () => { for await (const row of expandRecords(context, wrong)) void row; });
+  }
+  await assert.rejects(async () => {
+    for await (const row of expandRecords(context, compact, { binding: 'c'.repeat(64) })) void row;
+  }, /another provider/);
+  const temporary = process.env.TMPDIR;
+  assert.ok(temporary && !relative(join(root, '.runtime'), resolve(temporary)).startsWith('..'));
+  const directory = await mkdtemp(join(temporary, 'diagnose-audit-test-'));
+  try {
+    const path = join(directory, 'compact.jsonl');
+    const bytes = compact.map(row => JSON.stringify(row)).join('\n') + '\n';
+    await writeFile(path, bytes);
+    const script = join(root, 'diagnose-dev.mjs');
+    const audit = JSON.parse(execFileSync(process.execPath, [script, registryPath, panelPath, '--audit', path],
+      { encoding: 'utf8' }));
+    assert.equal(audit.observations, 5);
+    assert.equal(audit.model_inference_performed, false);
+    const output = execFileSync(process.execPath, [script, registryPath, panelPath, '--expand', path, compact[2].case_id],
+      { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 }).trimEnd().split('\n').map(JSON.parse);
+    assert.equal(output.length, 2);
+    assert.deepEqual(output[0].observation, full[2]);
+    assert.equal(output[1].kind, 'audit');
+    assert.equal(await readFile(path, 'utf8'), bytes);
+  } finally { await rm(directory, { recursive: true }); }
+});
+
+test('relay persists only through its coordinator and resumes the verified compact prefix', async () => {
+  const temporary = process.env.TMPDIR;
+  assert.ok(temporary && !relative(join(root, '.runtime'), resolve(temporary)).startsWith('..'));
+  const directory = await mkdtemp(join(temporary, 'diagnose-relay-test-'));
+  const path = join(directory, 'receipts.jsonl'), binding = 'd'.repeat(64);
+  const selected = context.plan.filter(row => shardOf(row) === 0);
+  let active;
+  const start = () => {
+    const child = spawn(process.execPath, [join(root, 'diagnose-dev.mjs'), registryPath, panelPath,
+      path, '0', '4', '536870912', binding, '--relay-persist'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const input = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    const records = input[Symbol.asyncIterator]();
+    let errors = '';
+    child.stderr.on('data', bytes => { errors += bytes; });
+    const completed = once(child, 'exit');
+    return { child, input, completed,
+      next: async () => {
+        const row = await records.next();
+        assert.equal(row.done, false, errors);
+        return JSON.parse(row.value);
+      },
+      send: value => child.stdin.write(`${JSON.stringify(value)}\n`),
+      stop: async () => { child.kill('SIGTERM'); await completed; input.close(); } };
+  };
+  try {
+    active = start();
+    const request = await active.next();
+    assert.equal(request.kind, 'generate');
+    assert.equal(request.case_id, selected[0].case_id);
+    await assert.rejects(readFile(path), { code: 'ENOENT' });
+    const before = await harness.initial(context.registry, selected[0]);
+    const resolved = harness.resolve(selected[0], before);
+    active.send({ provider_kind: 'reference', complete: true,
+      raw_text: encodeCalls(resolved.allowed_batches[0]), raw_ids: [420001], diagnostic_worker_sha256: binding });
+    const persist = await active.next();
+    assert.equal(persist.kind, 'persist');
+    assert.equal(persist.observation.case_id, selected[0].case_id);
+    assert.equal(Object.hasOwn(persist.observation, 'after'), false);
+    assert.match(persist.observation.delivered_sha256, /^[a-f0-9]{64}$/);
+    await assert.rejects(readFile(path), { code: 'ENOENT' });
+    const bytes = `${JSON.stringify(persist.observation)}\n`;
+    await writeFile(path, bytes);
+    active.send({ kind: 'persisted', case_id: request.case_id });
+    assert.equal((await active.next()).case_id, selected[1].case_id);
+    await active.stop(); active = null;
+    active = start();
+    const resumed = await active.next();
+    assert.equal(resumed.kind, 'generate');
+    assert.equal(resumed.case_id, selected[1].case_id);
+    assert.equal(await readFile(path, 'utf8'), bytes);
+  } finally {
+    if (active) await active.stop();
+    await rm(directory, { recursive: true });
+  }
 });

@@ -1,6 +1,7 @@
 """CPU controls for admission, model identity, recovery and planned denominators."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import struct
 from tempfile import TemporaryDirectory
@@ -72,6 +73,15 @@ class DiagnosticControls(unittest.TestCase):
         self.assertEqual(d.recover_jsonl(path), [{'case_id': 'one'}])
         self.assertTrue(path.read_bytes().endswith(b'\n'))
 
+    def test_budget_failure_during_tail_repair_never_truncates_valid_record(self):
+        path = self.root / 'observations.jsonl'
+        original = b'{"case_id":"one"}'
+        path.write_bytes(original)
+        with patch.object(d, 'guarded_write', side_effect=ValueError('Budget cache containment failed')):
+            with self.assertRaisesRegex(ValueError, 'Budget cache containment'):
+                d.recover_jsonl(path)
+        self.assertEqual(path.read_bytes(), original)
+
     def test_corruption_inside_committed_rows_is_not_truncated(self):
         path = self.root / 'observations.jsonl'
         data = b'{"case_id":"one"}\nnot-json\n'
@@ -135,6 +145,65 @@ class DiagnosticControls(unittest.TestCase):
         with patch.object(d, 'disk_usage', return_value=type('Space', (), {'free': d.RESERVE})()):
             with self.assertRaises(RuntimeError): d.require_space(self.root, 1)
         self.assertEqual(list(self.root.iterdir()), [self.runs])
+
+    def test_disk_budget_preserves_baseline_and_never_credits_deleted_cache(self):
+        runtime = self.root / '.runtime'
+        runtime.mkdir()
+        old = runtime / 'old-cache'; old.write_bytes(b'o' * 16384)
+        output = self.runs / 'diagnostic'; output.mkdir()
+        with patch.object(d.reference_model, 'CACHE_ROOTS', ('.runtime/reference',), create=True):
+            budget = d.DiskBudget(output, create=True)
+            original = budget.path.read_bytes()
+            baseline = budget.usage()['controlled_and_cache_growth_bytes']
+            fresh = runtime / 'new-cache'; fresh.write_bytes(b'n' * 32768)
+            added = budget.usage()['controlled_and_cache_growth_bytes'] - baseline
+            self.assertGreaterEqual(added, 32768)
+            old.unlink()
+            self.assertGreaterEqual(budget.usage()['controlled_and_cache_growth_bytes'] - baseline, 32768)
+            resumed = d.DiskBudget(output)
+            self.assertEqual(resumed.path.read_bytes(), original)
+            self.assertEqual(resumed.usage(), budget.usage())
+
+    def test_disk_budget_charges_cached_reference_and_deduplicates_hardlinks(self):
+        reference = self.root / '.runtime/reference'
+        reference.mkdir(parents=True)
+        weights = reference / 'model'; weights.write_bytes(b'w' * 32768)
+        output = self.runs / 'diagnostic'; output.mkdir()
+        with patch.object(d.reference_model, 'CACHE_ROOTS', ('.runtime/reference',), create=True):
+            budget = d.DiskBudget(output, create=True)
+            before = budget.usage()
+            (reference / 'same-model').hardlink_to(weights)
+            after = budget.usage()
+            self.assertGreaterEqual(before['reference_bytes'], 32768)
+            self.assertLess(after['reference_bytes'] - before['reference_bytes'], 4096)
+            self.assertLess(after['charged_bytes'] - before['charged_bytes'], 4096)
+
+    def test_disk_cap_is_shared_by_concurrent_writers_and_rejects_before_append(self):
+        output = self.runs / 'diagnostic'; output.mkdir()
+        with patch.object(d.reference_model, 'CACHE_ROOTS', ('.runtime/reference',), create=True), \
+                patch.object(d, 'DISK_LIMIT', 180000), patch.object(d, 'RESERVE', 0), \
+                patch.object(d, 'AUXILIARY_ALLOWANCE', 0):
+            budget = d.DiskBudget(output, create=True)
+            def write(index):
+                path = output / f'worker-{index}.jsonl'
+                try:
+                    with path.open('ab') as stream:
+                        d.append_observation(stream, {'case_id': str(index), 'raw': 'x' * 60000})
+                except RuntimeError:
+                    self.assertEqual(path.stat().st_size, 0)
+                    return False
+                return True
+            with patch.object(d, 'ACTIVE_BUDGET', budget), ThreadPoolExecutor(max_workers=4) as pool:
+                outcomes = list(pool.map(write, range(4)))
+            self.assertTrue(any(outcomes))
+            self.assertFalse(all(outcomes))
+            self.assertLessEqual(budget.usage()['charged_bytes'], d.DISK_LIMIT)
+
+    def test_disk_inventory_rejects_external_symlink(self):
+        runtime = self.root / '.runtime'; runtime.mkdir()
+        (runtime / 'escape').symlink_to(self.root.parent)
+        with self.assertRaises(ValueError):
+            d.inventory(runtime)
 
     def source_fixture(self):
         source = self.runs / 'source'

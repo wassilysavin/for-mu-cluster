@@ -21,6 +21,20 @@ const hash = value => createHash('sha256').update(typeof value === 'string' ? va
 const call = (name, args) => ({ name, arguments: args });
 const refs = calls => calls.flatMap(c => ['target', '_replace', '_resolve', '_supersede']
   .filter(key => typeof c.arguments?.[key] === 'string').map(key => c.arguments[key]));
+export const compactObservationSchema = 'diagnostic-observation-v1-compact';
+
+export function compactObservation(observation) {
+  assert.ok(Object.hasOwn(observation, 'before') && Object.hasOwn(observation, 'after'));
+  const { before, after, ...record } = observation;
+  const exchange = after?.exchanges.at(-1);
+  const delivered = exchange ? Object.fromEntries(['id', 'question', 'assistant', 'outcome', 'error_code',
+    'semantic_turn_id'].filter(key => Object.hasOwn(exchange, key)).map(key => [key, exchange[key]])) : null;
+  return { ...record, observation_schema: compactObservationSchema,
+    before_sha256: before ? hash(before) : null,
+    after_sha256: after ? hash(after) : null,
+    after_semantic_sha256: after ? hash(after.semantic) : null,
+    delivered_sha256: delivered ? hash(delivered) : null, delivered };
+}
 
 function promptData(prompt) {
   const start = '<start_of_turn>user\n', end = '<end_of_turn>\n<start_of_turn>model\n';
@@ -192,7 +206,7 @@ export function createTrainDiagnostics(registry) {
         reference_targets: targets, reference_target_alternatives: item.allowed_batches.map(refs),
         authored_reference_eligible: targets.length > 0 };
       result = await harness.grade(registry, { ...item, panel: 'train_fixed',
-        policy: { kind: 'fresh' }, reference_eligible: targets.length > 0 }, before, after, resolved);
+        policy: { kind: 'fresh' }, turn_index: null, reference_eligible: targets.length > 0 }, before, after, resolved);
     }
     return { case_id: item.case_id, case_sha256, prompt_sha256: item.prompt_sha256,
       source: item.source, cohort: item.cohort, family_id: item.family_id, group: item.group,
@@ -202,9 +216,15 @@ export function createTrainDiagnostics(registry) {
       semantic_success: result?.success ?? null, semantic_result: result,
       success: result?.success ?? null, critical_status: result?.critical_status ?? null,
       error_kind: generation.error ?? after?.exchanges.at(-1).error_code ?? result?.failure_category ?? null,
-      generation, after, label_basis: item.label_basis, label_independently_rechecked_here: false };
+      generation, before: item.before, after, label_basis: item.label_basis, label_independently_rechecked_here: false };
   }
-  return { prepare, score };
+  async function expand(item, observation) {
+    assert.equal(observation.observation_schema, compactObservationSchema);
+    const full = await score(item, observation.generation);
+    assert.ok(equal(compactObservation(full), observation), 'Compact TRAIN receipt does not reproduce');
+    return full;
+  }
+  return { prepare, score, expand };
 }
 
 async function main() {
@@ -219,7 +239,12 @@ async function main() {
     const request = JSON.parse(line);
     let output;
     if (request.action === 'prepare') output = { kind: 'prepared', case: await diagnostic.prepare(request) };
-    else if (request.action === 'score') output = { kind: 'score', observation: await diagnostic.score(request.case, request.generation) };
+    else if (request.action === 'score') {
+      const observation = await diagnostic.score(request.case, request.generation);
+      output = { kind: 'score', observation: request.compact === true ? compactObservation(observation) : observation };
+    } else if (request.action === 'expand') {
+      output = { kind: 'expanded', observation: await diagnostic.expand(request.case, request.observation) };
+    }
     else throw new Error(`Unknown diagnostic action: ${request.action}`);
     await new Promise((yes, no) => process.stdout.write(`${JSON.stringify(output)}\n`, error => error ? no(error) : yes()));
   }

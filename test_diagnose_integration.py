@@ -59,6 +59,7 @@ class PanelInventoryTests(unittest.TestCase):
                     assert row['before']['sentinel'] == arm
                 return {'kind': 'prepared', 'case': {'case_id': row['case_id'], 'source': request['source'],
                         'semantic_eligible': True, 'exact_target': 'target',
+                        'prompt': request['prompt'], 'prompt_sha256': d.sha256(request['prompt'].encode()).hexdigest(),
                         'group': row.get('group', 'common')}}
 
         with TemporaryDirectory(dir=ROOT / '.runtime/tmp') as temporary:
@@ -77,6 +78,8 @@ class PanelInventoryTests(unittest.TestCase):
                     return iter(histories[path.stem])
                 raise AssertionError(f'Unexpected read: {path}')
 
+            source['train'].write_text(''.join(d.canonical(row) + '\n' for row in source_rows))
+            source['manifest']['assets']['tokenizer'] = d.record(ROOT / 'assets/tokenizer.json')
             with patch.object(d, 'rows', selected_rows), patch.object(d, 'NodeRPC', RPC), \
                     patch.object(d, 'validate_contexts', return_value=({}, {})), \
                     patch.object(d, 'panel_binding', return_value='inventory-fixture-only'), \
@@ -97,6 +100,17 @@ class PanelInventoryTests(unittest.TestCase):
                              {'control-1729': 1, 'treatment-1729': 1, 'baseline-7205': 1})
             self.assertTrue(all(row['baseline_exposure_count_is_membership_only'] for row in saved))
             self.assertTrue(all(row['input_token_count'] == 1 for row in saved))
+            self.assertTrue(all('prompt' not in row['case'] for row in saved))
+            self.assertTrue(all(row['storage'] == 'frozen-train-prefix-v1' for row in saved))
+            with patch.dict(sys.modules, {'tokenizers': SimpleNamespace(Tokenizer=Tokenizer)}):
+                expanded = d.panel_cases(result)
+                self.assertEqual(len(expanded), 2532)
+                self.assertTrue(all(row['case']['prompt'].startswith('prompt-') for row in expanded))
+                damaged = dict(saved[0])
+                damaged['case']['prompt_sha256'] = '0' * 64
+                (output / 'train-panel.jsonl').write_text(d.canonical(damaged) + '\n')
+                with self.assertRaisesRegex(ValueError, 'Restored TRAIN prompt'):
+                    d.panel_cases({**result, 'file': d.record(output / 'train-panel.jsonl')})
 
 
 class RealBridgeTests(unittest.TestCase):

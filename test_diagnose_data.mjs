@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { createTrainDiagnostics, materializeGeneration } from './diagnose-data.mjs';
+import { compactObservation, createTrainDiagnostics, materializeGeneration } from './diagnose-data.mjs';
 import { createRegistry } from './evaluation/registry.mjs';
 import { canonical } from './evaluation/schema.mjs';
 import { createSession, applyModelOutput, recordProviderFailure, recordIncompleteModelOutput,
@@ -137,5 +137,34 @@ test('preauthored scenario groups reproduce canonical gold and enumerate safe al
     const item = await diagnostic.prepare({ source: 'history', row });
     const verdict = await diagnostic.score(item, complete(row.calls));
     assert.equal(verdict.semantic_success, true, spec.case_id);
+  }
+});
+
+test('compact TRAIN retains raw evidence and reconstructs full states without generation', async () => {
+  let before = await createSession(registry, { dialogueVersion: 2, sessionId: 'compact-train' });
+  before = await applyModelOutput(registry, before, 'Explain TR.', encodeCalls([call('explain_purpose', { subject: 'TR' })]));
+  before = await applyModelOutput(registry, before, 'Explain BIDS.basepath.', encodeCalls([call('explain_purpose', { subject: 'BIDS.basepath' })]));
+  const item = await historyCase(before, 'Quote the first reply.', [call('repeat_exchange', { target: 'e1' })]);
+  const generation = { ...complete(item.gold_calls), raw_ids: [900000], diagnostic_worker_sha256: 'a'.repeat(64),
+    finish_reason: 'complete_batch', seconds: 1.25 };
+  const full = await diagnostic.score(item, generation), compact = compactObservation(full);
+  assert.equal(Object.hasOwn(compact, 'before'), false);
+  assert.equal(Object.hasOwn(compact, 'after'), false);
+  assert.match(compact.before_sha256, /^[a-f0-9]{64}$/);
+  assert.match(compact.after_sha256, /^[a-f0-9]{64}$/);
+  assert.match(compact.after_semantic_sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(compact.generation, generation);
+  assert.deepEqual(compact.semantic_result, full.semantic_result);
+  assert.equal(compact.delivered.assistant, full.after.exchanges.at(-1).assistant);
+  assert.equal(compact.delivered.outcome, 'committed');
+  assert.ok(JSON.stringify(compact).length < JSON.stringify(full).length);
+  assert.deepEqual(await diagnostic.expand(item, compact), full);
+  for (const alter of [
+    row => { row.after_sha256 = '0'.repeat(64); },
+    row => { row.delivered.assistant += ' altered'; },
+    row => { row.generation.raw_text = ''; },
+  ]) {
+    const wrong = structuredClone(compact); alter(wrong);
+    await assert.rejects(() => diagnostic.expand(item, wrong), /does not reproduce/);
   }
 });
