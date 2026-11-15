@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "kind": "diagnostic-train-context-restoration-v1",
+  "split": "train",
+  "source_dataset": {
+    "path": "outputs/gemprf-functions/training/cluster-repo/assets/train-full-v2.jsonl",
+    "bytes": 232754435,
+    "sha256": "024d21fba1d2fe73dc9f8d795552303acaeb099675d9d78df179c082c7e7afcb"
+  },
+  "source_manifest": {
+    "path": "outputs/gemprf-functions/data/corpus/revisions/full-replay-v2/manifest.json",
+    "bytes": 19339,
+    "sha256": "51a5febced94c48e318b5671c0ea9b43113c67eae62d2941a0567e3edf9ec890"
+  },
+  "source_lineage": {
+    "path": "outputs/gemprf-functions/data/corpus/revisions/full-replay-v2/lineage.jsonl",
+    "bytes": 3714969,
+    "sha256": "c5906ad71fa5a4dfb0c4df7e2f73770660218e6928bde754395491107e95a2e9"
+  },
+  "registry_sha256": "14f523a431292bcae2a50bbc692974a7d7dfec0251bdb305e0ae8ac17b9046a0",
+  "rows_in_source": 2977,
+  "restored_history_rows": 720,
+  "empty_history_rows_not_duplicated": 2257,
+  "checks": {
+    "source_sha256": true,
+    "every_source_line_bound_to_lineage": true,
+    "all_2977_rendered_prompt_hashes_match_frozen_lineage": true,
+    "all_2977_gold_after_states_match_frozen_lineage": true,
+    "full_history_before_states_reconstructed_from_authoring_sources": true,
+    "tokenizer_prefix_decode_match": true,
+    "tokenizer_prefix_decode_rows": 2977,
+    "full_restored_prompt_bytes_equal_decoded_prefix": 720
+  },
+  "source_artifacts": [
+    {
+      "path": "outputs/gemprf-functions/data/corpus/revisions/train-coverage-v1/manifest.json",
+      "bytes": 5690,
+      "sha256": "c2f2fde9ae07674ef83a0935e0bc45a8d45ea76a5c685845897642151a919555"
+    },
+    {
+      "path": "work/train-next/comparison-prepared/token-index.json",
+      "bytes": 431467,
+      "sha256": "ff476f4cf9684aaec652d20abbde9428c71357f21c067729b0361c6570d54ec3"
+    },
+    {
+      "path": "work/full-train-v2/build.mjs",
+      "bytes": 25109,
+      "sha256": "2b2e982b304bb15382a75bfcc8bd5cbbe2eb4e8f3ef8f1ed90a3f1913f2ce758"
+    },
+    {
+      "path": "work/full-train-v2/migrate-retry.mjs",
+      "bytes": 15046,
+      "sha256": "b6e810ff8b027627819c03a3089d70bbf40bf988e2e579d5fdcee3108cdac924"
+    },
+    {
+      "path": "work/full-train-v2/preserve-sessions.mjs",
+      "bytes": 6731,
+      "sha256": "1737dbdb7405ffd5aee0d300a5667fd5c20602573c333a61431f09c4dcb6c95a"
+    },
+    {
+      "path": "work/train-volume/sources.mjs",
+      "bytes": 4579,
+      "sha256": "0cb5011c61c567f81b8af516a79b635a199d69fa670b3722ae5e15b94e207bb5"
+    },
+    {
+      "path": "work/train-volume/recovery.mjs",
+      "bytes": 7399,
+      "sha256": "ef01980b5cef6fa24c40b30899c9100d58aecd2f1711252a504f4b5bcd662b04"
+    },
+    {
+      "path": "work/train-fit-reference-v1/recover-contexts.mjs",
+      "bytes": 9382,
+      "sha256": "ae24dbc1b9ccb81f6d134601270253e12f70265c25a19530d54030e36783bdb5"
+    },
+    {
+      "path": "outputs/gemprf-functions/data/corpus/reviewed/train.jsonl",
+      "bytes": 6658659,
+      "sha256": "0d71303adc81c03e3d3418d1a7739affbf0803e0474ad477ac22024046f00987"
+    },
+    {
+      "path": "outputs/gemprf-functions/data/corpus/revisions/train-coverage-v1/train-additions.jsonl",
+      "bytes": 59618707,
+      "sha256": "75022984c7f8f0027f3559b9591618e0fc589fa2d439c846bb74cf248a3faccb"
+    },
+    {
+      "path": "work/train-next/recovery-author/before-sessions.jsonl",
+      "bytes": 459023,
+      "sha256": "962b2228adcce3df79a27330bbe3e48eced16f772b269f8ce579dafce1dd2836"
+    },
+    {
+      "path": "work/train-next/coverage-author/corrections-before.jsonl",
+      "bytes": 464069,
+      "sha256": "d07a0ccf9396d105600f8bf42863d5099e0a4a97cb693fa7e26bbc4ebbfecca9"
+    }
+  ],
+  "model_inference": false,
+  "training": false,
+  "sealed_TEST_read": false,
+  "limitations": [
+    "Restores the historical training context; does not independently certify scientific labels."
+  ],
+  "tokenizer": {
+    "path": "assets/tokenizer.json",
+    "sha256": "b6b09a0b4a803ad453063ca4bb49a784540e8120004e2450e025df2b27d41fb2"
+  },
+  "contexts": {
+    "path": "assets/diagnostic-train-contexts.jsonl",
+    "rows": 720,
+    "bytes": 11444920,
+    "sha256": "7e4ca7063517e0fb7964027d9e143c0f367c2be5c780919ffb5aa3b5fd080ad0"
+  },
+  "verification_script": {
+    "path": "work/train-fit-reference-v1/verify-context-prefixes.py",
+    "sha256": "1b0c04a14b0bdd1f4f996d2105c2e56bc7d03c6b4a9fd1c8a347955ea1940aed"
+  }
+}

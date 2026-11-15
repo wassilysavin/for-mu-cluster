@@ -1,6 +1,50 @@
 # GEM-pRF Functions cluster runs
 
-This repository contains frozen experiment definitions and a runner for FunctionGemma training on NVIDIA V100 GPUs. The current actual-history comparison continues from the completed cluster checkpoint 7205. Earlier experiments and their inputs remain available. Every training course requires a successful FP32 pilot.
+This repository contains frozen FunctionGemma experiments and a separate post-run diagnostic for NVIDIA V100 GPUs. The diagnostic measures TRAIN fit and compares the completed history experiment with a pinned Qwen3-8B reference. Earlier experiments and their inputs remain available. Every training course requires a successful FP32 pilot.
+
+## TRAIN fit and stronger reference
+
+Use this branch **after the running actual-history comparison has finished**. Keep its checkout unchanged until then. The diagnostic requires a saved terminal result containing the baseline and both complete seed-1729 arms; it refuses partial pairs and an active execution lease before downloading any model. It does not resume, retrain or modify the history experiment.
+
+Inside your personal `vsavin/for-mu-cluster` checkout, with the existing environment active:
+
+```sh
+git fetch origin &&
+git switch train-fit-reference-v1 &&
+git pull --ff-only &&
+./cluster git lfs pull &&
+./cluster python diagnose.py --check &&
+./cluster python -u diagnose.py --gpus 4
+```
+
+Run the final command inside your existing tmux session. If you need a new one, start `./cluster tmux new -s gemprf-diagnostic`, then run `./cluster python -u diagnose.py --gpus 4` inside it. Reconnect with `./cluster tmux attach -t gemprf-diagnostic`. After an interruption, repeat the same diagnostic command with the same code and run directory. Do not reset source budgets, remove checkpoints, or create a second coordinator.
+
+**Storage:** the first diagnostic downloads approximately 16.4 GB of Qwen weights once, plus tokenizer/configuration files, and reserves 3.5 GiB for results and free space. Have approximately **21 GB free** in this checkout's filesystem before starting. This exceeds the earlier 3 GB training-output envelope. Downloading is refused beforehand if the combined space is insufficient. The four workers share the same on-disk model; there are no four separate downloads. Everything created by the command, including temporary files and caches, stays under this checkout. Other folders and existing caches are not cleaned.
+
+**Hardware:** four allocated V100 32 GB GPUs, with at least 25 GiB free per GPU for Qwen. The existing pinned `requirements.txt` is sufficient. Each GPU holds an independent inference replica. Model loading is staggered to reduce host-memory pressure. Cases are distributed across GPUs; all turns of one DEV dialogue stay on one GPU. This is parallel inference, not distributed training.
+
+The diagnostic performs:
+
+1. Authenticate the latest completed history recovery, its numerical PASS receipt, checkpoint lineage, frozen schedules and complete DEV observations. Measure baseline 7205 and both seed-1729 checkpoints 7991; do not select a winner or cherry-pick the better seed.
+2. Restore the exact fixed TRAIN inputs. The panel contains 1,572 common examples and 480 examples from each history arm: 2,532 distinct cases. The 720 historical common contexts are supplied in a checked sidecar, reconstructed from original authoring records and matched to the original tokenized prompts. Existing TRAIN is unchanged.
+3. Admit the reference transport on 32 predetermined TRAIN-only cases, including the longest native-token prefix. At least 30 must produce parseable native batches and at least one supported case must pass fully. A failed gate stops before reference DEV and saves the evidence. This is a transport check, not proof of strong domain competence.
+4. Generate answers for all 2,532 fixed cases with each student and Qwen. Score full delivered answer plus state, literal native exact match, canonical call match, errors and unresolved cases separately. Legitimate complete equivalent programs are accepted by the semantic rubric. Frozen TRAIN labels remain the reference; this does not independently establish their scientific truth.
+5. Evaluate Qwen on the unchanged DEV1250, retaining its own actual histories. Reuse the students' authenticated, complete source DEV observations with the unchanged executor/rubric, rather than run their evaluations again. Fixed-prefix inputs are identical; closed-loop inputs naturally differ after each model's own earlier answers. Report panels and whole dialogues separately, with paired pass/fail counts and unresolved cases disclosed.
+
+Each trained arm saw 2,052 distinct examples in 3,144 presentations. Its **own-seen TRAIN fit** excludes the other arm's 480 examples; those are reported as cross-history transfer. Baseline fit covers the 1,572 common members of its earlier full-v2 TRAIN, not all 2,977 original examples. Qwen did not train on this corpus, so its score is reference performance on the TRAIN panel, not memorization fit.
+
+The reference is [`Qwen/Qwen3-8B`](https://huggingface.co/Qwen/Qwen3-8B/tree/b968826d9c46dd6066d109eabc6255188de91218), pinned to revision `b968826d9c46dd6066d109eabc6255188de91218`. It runs in FP16 with Transformers 4.57.3, non-thinking greedy decoding and a 2,048-token generation limit. FunctionGemma keeps its original 512-token limit; tokenizers differ. Qwen receives the same developer contract and complete JSON question/history, with a mechanical chat-wrapper change and explicit native-call formatting instructions. There is no semantic routing, output repair, reasoning extraction, hidden tool-name conversion or context truncation. Prefill uses 256-token chunks and the official full cache with MATH attention. Context overflow remains a recorded planned failure; OOM and nonfinite logits stop for investigation and preserve completed observations.
+
+Greedy non-thinking inference is a fixed diagnostic recipe; Qwen's model card recommends sampling. A poor reference result may reflect prompting, format adaptation or domain knowledge. It is not a demonstrated ceiling of the compact model. No new training, parameter updates, sealed TEST access or product acceptance occur in this command.
+
+Results are in `runs/train-fit-reference-v1/result.json`. The terminal prints a compact comparison; raw generations, original tokenizer IDs, rendered-prompt hashes, before/after states and per-GPU observations remain beside it. Frozen identities bind resumes to each checkpoint, phase and GPU assignment. Dataset, code, model revision, source results and dependency versions cannot silently change during a resumed diagnostic. The same shared execution lease covers downloads and all model workers; workers exit if their coordinator disappears.
+
+Local checks before publication cover recovered contexts, equivalent programs, complete dialogue sharding, resume integrity, private paths and a tiny random official-Qwen dense/chunked calculation. Actual Qwen3-8B quality, FP16 behavior and V100 memory fit are measured only when this cluster command runs.
+
+```sh
+./cluster python -m unittest test_diagnose test_diagnose_integration test_reference_model
+./cluster node --test test_diagnose_data.mjs test_diagnose_dev.mjs
+```
 
 | File or folder | Purpose |
 | --- | --- |
@@ -14,6 +58,9 @@ This repository contains frozen experiment definitions and a runner for Function
 | `assets/` | Base weights, tokenizer, starting checkpoint, frozen datasets, and evaluator contracts. |
 | `runs/` | Local results, checkpoints, and observations. Git ignores this folder. |
 | `cluster`, `private_runtime.py` | Launch commands with temporary files and dependency caches confined to `.runtime/` in this checkout. |
+| `diagnose.py`, `diagnose-data.mjs`, `diagnose-dev.mjs` | Post-run TRAIN-fit measurement and four-GPU reference comparison. |
+| `reference_model.py` | Pinned local Qwen download, transport adapter and bounded-memory inference. |
+| `assets/diagnostic-train-contexts.*` | Exact restored TRAIN histories and their provenance; no new training examples. |
 
 ## Private temporary files
 
