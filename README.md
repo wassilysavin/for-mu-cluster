@@ -2,9 +2,33 @@
 
 This repository contains frozen FunctionGemma experiments and a separate post-run diagnostic for NVIDIA V100 GPUs. The diagnostic measures TRAIN fit and compares the completed history experiment with a pinned Qwen3-1.7B reference. Earlier experiments and their inputs remain available. Every training course requires a successful FP32 pilot.
 
+## Finish the stopped current comparison
+
+The original `history --repair-parity` command retains its 36-hour budget and returns an existing `budget_stopped` result. The user authorized completing both current arms and their checks regardless of duration on 2026-11-16. Once that coordinator has exited, use the separate continuation below inside the same personal checkout and original Python environment:
+
+```sh
+. ../.venv/bin/activate
+./cluster git fetch origin &&
+./cluster git switch train-fit-reference-v1 &&
+./cluster git pull --ff-only &&
+./cluster python -u finish_history.py --gpus 4
+```
+
+Run this inside an existing tmux session. If outside tmux, first enter one with `./cluster tmux new -A -s gemprf-history`, then run the commands there. This uses the private socket in the checkout. Do not nest tmux sessions or run two coordinators. The shared execution lease rejects concurrent model jobs.
+
+This continuation authenticates the original numerical PASS, collected TRAIN, worker identities, schedules, checkpoints and saved DEV prefixes. It finishes only **control-1729 and treatment-1729**: 786 updates per arm from 7205 to 7991, known DEV155 at 7598, and all 1,250 fresh DEV observations at 7991. A completed control training checkpoint and its known DEV are reused. Only missing fresh DEV replies are generated; treatment resumes from its latest saved checkpoint if present. Four GPUs train each arm; the original evaluator still uses the primary GPU. No new model or dependency download is needed.
+
+Only the elapsed-time cutoff is removed. Original model/training/evaluation files, dataset hashes, optimizer recipe, 3,246 cumulative update ceiling, disk admission and 512 MiB reserve remain intact. The original `budget.json`, `result.json`, manifests and existing stage receipts are preserved. Pending worker checkpoints and evaluation logs advance in their existing paths; the new manifest, inherited work account and stage receipts are under:
+
+```text
+runs/actual-history-v3-4gpu/revisions/rope-alignment-v1/recovery/checkpoint-io-v1/completion-v1/
+```
+
+Repeat `./cluster python -u finish_history.py --gpus 4` after an interruption without changing files or resetting accounts. Its final `result.json` compares the full first pair using the original gates; unresolved reviews remain unresolved. It does not start seed 2718 or establish product acceptance. Conservative elapsed accounting can include an uncertain offline interval, so it is not GPU compute time. The TRAIN-fit diagnostic below automatically uses and authenticates this completed continuation; an incomplete continuation blocks diagnostic admission.
+
 ## TRAIN fit and stronger reference
 
-Use this branch **after the running actual-history comparison has finished**. Keep its checkout unchanged until then. The diagnostic requires a saved terminal result containing the baseline and both complete seed-1729 arms; it refuses partial pairs and an active execution lease before downloading any model. It does not resume, retrain or modify the history experiment.
+Run this diagnostic **after the actual-history comparison has finished**, using the continuation above if it stopped on time. Keep the checkout unchanged while a coordinator is running. The diagnostic requires a saved terminal result containing the baseline and both complete seed-1729 arms; it refuses partial pairs and an active execution lease before downloading any model. The diagnostic itself does not resume, retrain or modify the history experiment.
 
 Inside your personal `vsavin/for-mu-cluster` checkout, with the existing environment active:
 
@@ -64,6 +88,7 @@ Local checks before publication cover recovered contexts, equivalent programs, c
 | `runs/` | Local results, checkpoints, and observations. Git ignores this folder. |
 | `cluster`, `private_runtime.py` | Launch commands with temporary files and dependency caches confined to `.runtime/` in this checkout. |
 | `diagnose.py`, `diagnose-data.mjs`, `diagnose-dev.mjs` | Post-run TRAIN-fit measurement and four-GPU reference comparison. |
+| `finish_history.py` | Finish the existing seed-1729 pair without an elapsed-time cutoff, preserving its original protocol and records. |
 | `reference_model.py` | Pinned local Qwen download, transport adapter and bounded-memory inference. |
 | `assets/diagnostic-train-contexts.*` | Exact restored TRAIN histories and their provenance; no new training examples. |
 

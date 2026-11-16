@@ -21,6 +21,7 @@ from threading import Thread
 from time import monotonic, sleep
 
 import history
+import finish_history as completion
 from ledger import SAFE_ID, code_record, execution_lease, file_record, publish_json as ledger_publish_json
 import reference_model
 
@@ -37,7 +38,7 @@ PILOT_CASES = 32
 PILOT_TRANSPORT_MINIMUM = 30
 BASE_CODE = ['model.py', 'ledger.py', 'private_runtime.py', 'cluster', 'history.py', 'history_prepare.py',
              'run.py', 'requirements.txt', 'experiments.json', 'experiments-history.json']
-NEW_CODE = ['diagnose.py', 'diagnose-data.mjs', 'diagnose-dev.mjs', 'reference_model.py']
+NEW_CODE = ['diagnose.py', 'diagnose-data.mjs', 'diagnose-dev.mjs', 'reference_model.py', 'finish_history.py']
 
 
 def read(path):
@@ -188,11 +189,15 @@ def latest_source(runs, source_id):
     if not SAFE_ID.fullmatch(source_id):
         raise ValueError('Invalid source run ID')
     parent = history.contained(runs / source_id, runs)
-    candidates = [parent / 'revisions/rope-alignment-v1/recovery/checkpoint-io-v1',
+    recovered = parent / 'revisions/rope-alignment-v1/recovery/checkpoint-io-v1'
+    completed = recovered / completion.COMPLETION_NAME
+    if completed.is_symlink():
+        raise ValueError('History completion directory must not be a symlink')
+    candidates = [completed, recovered,
                   parent / 'revisions/rope-alignment-v1', parent]
     for candidate in candidates:
         candidate = history.contained(candidate, runs)
-        if candidate.exists() and any(candidate.iterdir()):
+        if candidate.exists() and (candidate.name == completion.COMPLETION_NAME or any(candidate.iterdir())):
             experiment = history.contained(candidate / 'experiment.json', ROOT)
             result = history.contained(candidate / 'result.json', ROOT)
             if not experiment.is_file() or not result.is_file():
@@ -204,6 +209,8 @@ def latest_source(runs, source_id):
 def source_context(runs, source_id):
     import run as runner
     source = latest_source(runs, source_id)
+    if source.name == completion.COMPLETION_NAME:
+        return completion.load_completed_source(runs, source_id)
     manifest, result = read(source / 'experiment.json'), read(source / 'result.json')
     binding = history.digest(manifest)
     if result.get('identity_sha256') != binding:

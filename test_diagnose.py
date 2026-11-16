@@ -40,6 +40,59 @@ class DiagnosticControls(unittest.TestCase):
         self.save(newest / 'result.json', {'status': 'finished'})
         self.assertEqual(d.latest_source(self.runs, 'source'), newest)
 
+    def test_empty_or_partial_completion_never_falls_back_to_closed_recovery(self):
+        source = self.runs / 'source/revisions/rope-alignment-v1/recovery/checkpoint-io-v1'
+        self.save(source / 'experiment.json', {})
+        self.save(source / 'result.json', {'status': 'budget_stopped'})
+        completed = source / d.completion.COMPLETION_NAME
+        completed.mkdir()
+        with self.assertRaisesRegex(RuntimeError, 'no terminal result'):
+            d.latest_source(self.runs, 'source')
+        self.save(completed / 'experiment.json', {})
+        with self.assertRaisesRegex(RuntimeError, 'no terminal result'):
+            d.latest_source(self.runs, 'source')
+        self.save(completed / 'result.json', {'status': 'finished'})
+        self.assertEqual(d.latest_source(self.runs, 'source'), completed)
+        (completed / 'experiment.json').unlink()
+        with self.assertRaisesRegex(RuntimeError, 'no terminal result'):
+            d.latest_source(self.runs, 'source')
+
+    def test_completion_symlink_cannot_substitute_the_old_closed_source(self):
+        source = self.runs / 'source/revisions/rope-alignment-v1/recovery/checkpoint-io-v1'
+        self.save(source / 'experiment.json', {})
+        self.save(source / 'result.json', {'status': 'budget_stopped'})
+        (source / d.completion.COMPLETION_NAME).symlink_to(source, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'completion directory.*symlink'):
+            d.latest_source(self.runs, 'source')
+
+    def test_completion_uses_authenticated_parent_context_and_child_evidence(self):
+        source = self.runs / 'source/revisions/rope-alignment-v1/recovery/checkpoint-io-v1'
+        completed = source / d.completion.COMPLETION_NAME
+        self.save(source / 'experiment.json', {'origin': 'original'})
+        self.save(source / 'result.json', {'status': 'budget_stopped'})
+        self.save(completed / 'experiment.json', {'origin': 'completion'})
+        self.save(completed / 'result.json', {'status': 'not_promoted'})
+        context = {'directory': source, 'manifest': {'origin': 'original'},
+                   'result': {'status': 'not_promoted'}, 'prepared': {'unchanged': True},
+                   'train': source / 'train.jsonl', 'students': {'baseline-7205': {},
+                       'control-1729': {}, 'treatment-1729': {}},
+                   'evidence': [d.record(source / 'result.json'), d.record(completed / 'result.json')]}
+        with patch.object(d.completion, 'load_completed_source', return_value=context) as load:
+            self.assertIs(d.source_context(self.runs, 'source'), context)
+        load.assert_called_once_with(self.runs, 'source')
+
+    def test_invalid_completion_provenance_never_falls_back_to_old_result(self):
+        source = self.runs / 'source/revisions/rope-alignment-v1/recovery/checkpoint-io-v1'
+        completed = source / d.completion.COMPLETION_NAME
+        self.save(source / 'experiment.json', {})
+        self.save(source / 'result.json', {'status': 'budget_stopped'})
+        self.save(completed / 'experiment.json', {})
+        self.save(completed / 'result.json', {'status': 'not_promoted'})
+        with patch.object(d.completion, 'load_completed_source', side_effect=ValueError('Completion identity changed')) as load:
+            with self.assertRaisesRegex(ValueError, 'Completion identity changed'):
+                d.source_context(self.runs, 'source')
+        load.assert_called_once_with(self.runs, 'source')
+
     def test_source_path_rejects_escape_before_listing(self):
         parent = self.runs / 'source'
         parent.mkdir()
@@ -205,9 +258,9 @@ class DiagnosticControls(unittest.TestCase):
         with self.assertRaises(ValueError):
             d.inventory(runtime)
 
-    def source_fixture(self):
-        source = self.runs / 'source'
-        source.mkdir()
+    def source_fixture(self, source=None):
+        source = source or self.runs / 'source'
+        source.mkdir(parents=True)
         def checkpoint(name, step, lineage):
             path = source / f'{name}.safetensors'
             header = json.dumps({'__metadata__': {'step': str(step), 'lineage': json.dumps(lineage)}}).encode()
@@ -254,6 +307,114 @@ class DiagnosticControls(unittest.TestCase):
         with patch.object(d.history, 'validate_prepared', return_value=((train, d.record(train)), schedules)), \
              patch.object(d.history, 'validate_score'):
             return d.source_context(self.runs, 'source')
+
+    def completion_fixture(self):
+        parent = self.runs / 'source/revisions/rope-alignment-v1/recovery/checkpoint-io-v1'
+        parent, result, train, _, checkpoint = self.source_fixture(parent)
+        manifest, prepared = d.read(parent / 'experiment.json'), d.read(parent / 'stages/prepare.json')['result']
+        identities = d.read(parent / 'identities.json')
+        outcome = {'passed': False, 'status': 'not_promoted'}
+        result['pairs'][0]['decision'] = outcome
+        self.save(parent / 'result.json', {**result, 'status': 'budget_stopped', 'pairs': []})
+        self.save(parent / 'stages/baseline.json', {
+            'identity_sha256': d.history.digest(manifest), 'result': result['baseline']})
+        regressions = {}
+        for arm in ('control', 'treatment'):
+            name = f'{arm}-1729'
+            weights = checkpoint(name + '-midpoint', 7598, {
+                'identity_sha256': d.history.digest(identities[name]),
+                'initial_checkpoint_sha256': manifest['origin']['checkpoint']['sha256']})
+            regressions[arm] = {**result['pairs'][0][arm], 'checkpoint': weights}
+        self.save(parent / 'stages/control-1729-regression.json', {
+            'identity_sha256': d.history.digest(manifest), 'result': regressions['control']})
+        for suffix, evaluated in (('midpoint', regressions['control']), ('trained', result['pairs'][0]['control'])):
+            self.save(parent / 'stages' / f'control-1729-{suffix}.json', {
+                'identity_sha256': d.history.digest(manifest), 'result': {'checkpoint': evaluated['checkpoint']}})
+        inherited = {'identity_sha256': 'original-budget', 'maximum_updates': d.history.MAX_UPDATES,
+                     'charged_updates': 800, 'maximum_seconds': d.history.MAX_SECONDS,
+                     'elapsed_seconds': 140000.0, 'stages': [], 'inflight': None}
+        old_budget = self.runs / 'source/budget.json'
+        self.save(old_budget, inherited)
+        static = [d.record(path) for path in sorted(parent.rglob('*')) if path.is_file()] + [d.record(old_budget)]
+        source = {'directory': parent, 'manifest': manifest, 'prepared': prepared, 'train': train,
+                  'identities': identities, 'budget': inherited, 'static': static}
+        output = parent / d.completion.COMPLETION_NAME
+        (self.root / 'finish_history.py').write_text('# Synthetic validator fixture.\n')
+        completion = {'schema': 1, 'policy': d.completion.POLICY,
+                      'source_directory': str(parent.relative_to(self.root)),
+                      'source_manifest': d.record(parent / 'experiment.json'),
+                      'inherited_budget': inherited,
+                      'source_snapshot': {'immutable': static, 'append_only_prefixes': [],
+                          'admitted_latest_checkpoints': [], 'original_result_present': True},
+                      'code': d.code_record(self.root, ['finish_history.py'])}
+        binding = d.history.digest(completion)
+        self.save(output / 'experiment.json', completion)
+        self.save(output / 'manifest-binding.json', {'sha256': binding})
+        budget = {**inherited, 'identity_sha256': binding, 'inherited_sha256': d.history.digest(inherited),
+                  'maximum_seconds': None, 'charged_updates': 1600, 'elapsed_seconds': 280000.0,
+                  'prior_time_limit_seconds': inherited['maximum_seconds']}
+        self.save(output / 'budget.json', budget)
+        for name, value in [('treatment-1729-regression', regressions['treatment']),
+                ('treatment-1729-midpoint', {'checkpoint': regressions['treatment']['checkpoint']}),
+                ('treatment-1729-trained', {'checkpoint': result['pairs'][0]['treatment']['checkpoint']}), *[
+                (f'{arm}-1729-final', result['pairs'][0][arm]) for arm in ('control', 'treatment')]]:
+            self.save(output / 'stages' / f'{name}.json', {'identity_sha256': binding, 'result': value})
+        artifacts = [d.record(output / name) for name in ('experiment.json', 'manifest-binding.json', 'budget.json')]
+        artifacts += [d.record(path) for path in sorted((output / 'stages').glob('*.json'))]
+        result.update(identity_sha256=binding, completion_policy=d.completion.POLICY, budget=budget,
+                      original_budget=inherited, artifacts=artifacts, TEST_opened=False,
+                      exploratory=True, product_acceptance=False)
+        self.save(output / 'result.json', result)
+        return source, output, result, outcome
+
+    def completion_call(self, source, outcome):
+        with patch.object(d.completion, 'ROOT', self.root), \
+                patch.object(d.completion, 'load_source', return_value=source), \
+                patch.object(d.history, 'validate_score'), patch.object(d.history, 'decision', return_value=outcome):
+            return d.source_context(self.runs, 'source')
+
+    def test_real_completion_loader_retains_parent_and_child_provenance(self):
+        source, output, result, outcome = self.completion_fixture()
+        original_result = (source['directory'] / 'result.json').read_bytes()
+        context = self.completion_call(source, outcome)
+        self.assertEqual(context['directory'], source['directory'])
+        self.assertEqual(context['manifest'], source['manifest'])
+        self.assertEqual(context['train'], source['train'])
+        self.assertEqual(context['result'], result)
+        self.assertEqual(list(context['students']), ['baseline-7205', 'control-1729', 'treatment-1729'])
+        evidence = {entry['path']: entry for entry in context['evidence']}
+        for entry in [*source['static'], *result['artifacts'], d.record(output / 'result.json')]:
+            self.assertEqual(evidence[entry['path']], entry)
+        for entry in context['evidence']:
+            d.verify(entry)
+        self.assertEqual((source['directory'] / 'result.json').read_bytes(), original_result)
+
+    def test_real_completion_loader_rejects_wrong_result_identity(self):
+        source, output, result, outcome = self.completion_fixture()
+        self.save(output / 'result.json', {**result, 'identity_sha256': 'another-completion'})
+        with self.assertRaisesRegex(ValueError, 'Completion result identity'):
+            self.completion_call(source, outcome)
+
+    def test_real_completion_loader_rejects_changed_parent_receipt(self):
+        source, _, _, outcome = self.completion_fixture()
+        self.save(source['directory'] / 'result.json', {'status': 'changed'})
+        with self.assertRaisesRegex(ValueError, 'Frozen continuation input changed'):
+            self.completion_call(source, outcome)
+
+    def test_real_completion_loader_rejects_incomplete_artifact_inventory(self):
+        source, output, result, outcome = self.completion_fixture()
+        self.save(output / 'result.json', {**result, 'artifacts': result['artifacts'][1:]})
+        with self.assertRaisesRegex(ValueError, 'Completion artifact inventory changed'):
+            self.completion_call(source, outcome)
+
+    def test_real_completion_loader_rejects_missing_training_stage(self):
+        source, output, result, outcome = self.completion_fixture()
+        missing = output / 'stages/treatment-1729-midpoint.json'
+        missing.unlink()
+        artifacts = [entry for entry in result['artifacts'] if entry['path'] != str(missing.relative_to(self.root))]
+        self.save(output / 'result.json', {**result, 'artifacts': artifacts})
+        with self.assertRaisesRegex(ValueError, 'missing.*stage receipt'):
+            self.completion_call(source, outcome)
 
     def test_complete_negative_pair_is_admitted_without_choosing_a_winner(self):
         source, result, train, schedules, _ = self.source_fixture()
