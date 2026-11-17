@@ -2,6 +2,22 @@
 
 This repository contains frozen FunctionGemma experiments and a separate post-run diagnostic for NVIDIA V100 GPUs. The diagnostic measures TRAIN fit and compares the completed history experiment with a pinned Qwen3-1.7B reference. Earlier experiments and their inputs remain available. Every training course requires a successful FP32 pilot.
 
+## Recheck Qwen format on the same 32 TRAIN cases
+
+After `TRAIN_FIT_COMPLETE_REFERENCE_NOT_QUALIFIED`, run this in the existing environment and checkout:
+
+```sh
+./cluster git pull --ff-only && ./cluster python -u qualify_reference.py --gpus 4
+```
+
+This runs **only the original 32 qualification cases**, split across four V100 GPUs. It performs no training, student evaluation or DEV generation. It uses the existing pinned Qwen snapshot offline; no weights or dependencies are downloaded. Results are separate under `runs/train-fit-reference-v1/revisions/qwen-hermes-v1/result.json`. The original diagnostic's 3 GB disk account includes this child directory and its existing results/cache; the account is not reset. The shared execution lease and private temporary paths remain in effect.
+
+The adapter requests Qwen's documented [Hermes JSON tool-call format](https://qwen.readthedocs.io/en/latest/framework/function_call.html), using the official non-thinking chat wrapper and the complete original compact function contract. It does not expand that contract into a duplicated per-tool `tools=` payload. Only two transport instruction lines and the output-format instructions change; the question, history, function meanings and all argument constraints are retained. Greedy decoding, FP16 weights, context and completion limits remain those of the previous reference recipe; this is not a claim of optimal Qwen quality. Each worker explicitly enables the recorded deterministic numerical policy.
+
+Every original response and token ID is saved. Only a complete, valid Hermes batch ending at the model's EOS is serialized into the executor's native format. Names, arguments, types and order remain model-selected; prose, malformed JSON, duplicate keys and unfinished batches are failures, not repaired outputs. Admission still requires at least **30/32 valid batches and one complete supported answer**. Passing this check does not start any further experiment or establish domain quality or product acceptance.
+
+Use `./cluster python -u qualify_reference.py --gpus 4` to resume after interruption, without pulling new code. Saved responses are verified and reused; a completed run only verifies and displays its report without loading a model. Run inside your existing private tmux session if you may disconnect. Offline checks: `./cluster python -m unittest test_qwen_transport test_qualify_reference test_inspect_reference`.
+
 ## Finish the stopped current comparison
 
 The original `history --repair-parity` command retains its 36-hour budget and returns an existing `budget_stopped` result. The user authorized completing both current arms and their checks regardless of duration on 2026-11-16. Once that coordinator has exited, use the separate continuation below inside the same personal checkout and original Python environment:
@@ -98,6 +114,7 @@ Local checks before publication cover recovered contexts, equivalent programs, c
 | `diagnose.py`, `diagnose-data.mjs`, `diagnose-dev.mjs` | Post-run TRAIN-fit measurement and four-GPU reference comparison. |
 | `finish_history.py` | Finish the existing seed-1729 pair without an elapsed-time cutoff, preserving its original protocol and records. |
 | `inspect_reference.py` | Read a completed reference-admission report and display verified counts and short failed-response examples. |
+| `qualify_reference.py`, `qwen_transport.py` | Recheck only the same 32 TRAIN cases using Qwen Hermes output and the existing weights. |
 | `reference_model.py` | Pinned local Qwen download, transport adapter and bounded-memory inference. |
 | `assets/diagnostic-train-contexts.*` | Exact restored TRAIN histories and their provenance; no new training examples. |
 
