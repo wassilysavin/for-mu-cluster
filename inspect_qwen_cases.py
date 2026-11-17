@@ -10,6 +10,7 @@ import qualify_reference as qualification
 
 
 EXPECTED_COUNTS = {'contract_not_implemented': 1, 'review_required': 4, 'invalid_arguments': 8}
+DISCUSSED_REVIEW_ID = 'control:history-v3-train-error_and_success-18-fresh_after_success-control'
 
 
 def load_evidence():
@@ -177,11 +178,85 @@ def show(report, full=False):
     print('All 32 saved identities, scores and hashes verified. CPU executor replay only; no model, downloads or saved-result changes.')
 
 
+def remaining_reviews(report):
+    reviews = [(index, item) for index, item in enumerate(report['items'], 1)
+               if item['category'] == 'review_required']
+    ids = [item['case_id'] for _, item in reviews]
+    if (report['unresolved'] != 4 or report['counts'].get('review_required') != 4
+            or len(ids) != 4 or len(set(ids)) != 4 or ids.count(DISCUSSED_REVIEW_ID) != 1
+            or any(item['inspection']['critical_status'] != 'review_required'
+                   or (item['inspection'].get('review') or {}).get('status') != 'review_required'
+                   for _, item in reviews)):
+        raise ValueError('Expected four saved reviews including the previously displayed case')
+    return [(index, item) for index, item in reviews if item['case_id'] != DISCUSSED_REVIEW_ID]
+
+
+def short_value(value, limit):
+    text = compact(value)
+    marker = ' ... [clipped; --full]'
+    if limit <= len(marker):
+        raise ValueError('Display limit is too short for an explicit clipping marker')
+    return text if len(text) <= limit else text[:limit - len(marker)] + marker
+
+
+def reply_excerpt(text, utf16_offset):
+    # The Node comparator records UTF-16 offsets, not Python character offsets.
+    position = len(text.encode('utf-16-le')[:utf16_offset * 2].decode('utf-16-le', errors='ignore'))
+    return text[max(0, position - 4):position + 76]
+
+
+def show_remaining_reviews(report):
+    selected = remaining_reviews(report)
+    print('Remaining for discussion: 3/4 saved reviews. Previously displayed case excluded only from this view.')
+    for index, item in selected:
+        inspection = item['inspection']
+        review = inspection['review']
+        alternatives = review['alternatives']
+        if not alternatives:
+            raise ValueError('Saved review has no frozen alternatives')
+        first = alternatives[0]
+        context = {'history': [[exchange.get('id'), exchange.get('question'), exchange.get('model_calls')]
+                               for exchange in item['context']['exchanges']],
+                   'pending': item['context']['pending'],
+                   'other_exchanges': item['context']['omitted_exchanges']}
+        print(f'[{index}] ' + short_value(item['case_id'], 120))
+        print('  Question:', short_value(item['question'], 260))
+        print('  Context (id, question, calls):', short_value(context, 260))
+        print('  Qwen:', short_value(inspection['model_calls'], 340))
+        print(f'  Frozen alternative {first["index"]}/{len(alternatives)} (zero-based):',
+              short_value(first['calls'], 340))
+        display = sum(value['delivered']['equal'] for value in alternatives)
+        state = sum(value['semantic']['equal'] for value in alternatives)
+        both = sum(value['delivered']['equal'] and value['semantic']['equal'] for value in alternatives)
+        print(f'  All {len(alternatives)} alternatives: display_match={display}; state_match={state}; both_match={both}.')
+        offset = first['delivered']['first_difference']
+        if offset is not None:
+            actual = reply_excerpt(review['actual']['delivered'], offset)
+            expected = reply_excerpt(first['expected']['delivered'], offset)
+            print(f'  Reply excerpts at alternative {first["index"]} difference {offset}:',
+                  'actual=' + short_value(actual, 140), 'expected=' + short_value(expected, 140))
+        semantic = first['semantic']
+        paths = [value['path'] for value in semantic['entries']]
+        suffix = '+' if semantic['truncated'] else ''
+        print(f'  Sampled state paths (first 3/{len(paths)}{suffix}, alternative {first["index"]}):',
+              short_value(paths[:3], 120))
+    print('All 4 saved reviews remain unresolved; scores unchanged. Excerpts are partial; --full retains all histories and alternatives.')
+    print('Frozen labels are not independent scientific adjudication.')
+    print('All 32 saved cases authenticated. No model run, download or saved-result change.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--full', action='store_true', help='Print complete diagnostic JSON and selected histories')
+    view = parser.add_mutually_exclusive_group()
+    view.add_argument('--full', action='store_true', help='Print complete diagnostic JSON and selected histories')
+    view.add_argument('--remaining-reviews', action='store_true',
+                      help='Briefly show the three reviews after the already displayed first review; scores stay unchanged')
     args = parser.parse_args()
-    show(load_report(), full=args.full)
+    report = load_report()
+    if args.remaining_reviews:
+        show_remaining_reviews(report)
+    else:
+        show(report, full=args.full)
 
 
 if __name__ == '__main__':

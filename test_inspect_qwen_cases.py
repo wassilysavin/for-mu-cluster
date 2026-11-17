@@ -287,6 +287,256 @@ class ReportTests(unittest.TestCase):
                 rpc.assert_not_called()
 
 
+class RemainingReviewTests(unittest.TestCase):
+    @staticmethod
+    def prepared():
+        cases, rows = targeted_cases()
+        result = report.build_report(cases, rows, InspectionRPC())
+        discussed = next(item for item in result['items'] if item['case_id'] == 'case-03')
+        discussed['case_id'] = report.DISCUSSED_REVIEW_ID
+        discussed['inspection']['case_id'] = report.DISCUSSED_REVIEW_ID
+        for item in result['items']:
+            review = item['inspection']['review']
+            if review is not None:
+                review['actual']['delivered'] = review['actual']['text']
+                for alternative in review['alternatives']:
+                    alternative['expected']['delivered'] = alternative['expected']['text']
+        return result
+
+    @staticmethod
+    def rendered(result):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            report.show_remaining_reviews(result)
+        return output.getvalue()
+
+    def test_selection_keeps_original_indices_and_review_flags_without_mutation(self):
+        result = self.prepared()
+        before = deepcopy(result)
+        selected = report.remaining_reviews(result)
+        self.assertEqual([index for index, _ in selected], [3, 4, 5])
+        self.assertEqual([item['case_id'] for _, item in selected], ['case-04', 'case-05', 'case-06'])
+        for index, item in selected:
+            self.assertIs(item, result['items'][index - 1])
+            self.assertEqual(item['inspection']['critical_status'], 'review_required')
+            self.assertEqual(item['inspection']['error_kind'], 'semantic_unresolved')
+        self.rendered(result)
+        self.assertEqual(result, before)
+        self.assertEqual((result['unresolved'], result['counts']['review_required']), (4, 4))
+
+    def test_discussed_case_is_excluded_by_exact_identity_after_reordering(self):
+        result = self.prepared()
+        result['items'] = list(reversed(result['items']))
+        expected = [(index, item) for index, item in enumerate(result['items'], 1)
+                    if item['category'] == 'review_required' and item['case_id'] != report.DISCUSSED_REVIEW_ID]
+        self.assertEqual(report.remaining_reviews(result), expected)
+        self.assertEqual(len(expected), 3)
+        self.assertNotIn(report.DISCUSSED_REVIEW_ID, [item['case_id'] for _, item in expected])
+
+    def test_missing_duplicate_or_inconsistent_review_evidence_is_rejected(self):
+        mutations = []
+        missing_identity = self.prepared()
+        missing_identity['items'][1]['case_id'] = 'another-control-case'
+        mutations.append(missing_identity)
+        duplicate_identity = self.prepared()
+        duplicate_identity['items'][2]['case_id'] = report.DISCUSSED_REVIEW_ID
+        duplicate_identity['items'][2]['inspection']['case_id'] = report.DISCUSSED_REVIEW_ID
+        mutations.append(duplicate_identity)
+        missing_review = self.prepared()
+        missing_review['items'][2]['inspection']['review'] = None
+        mutations.append(missing_review)
+        missing_item = self.prepared()
+        del missing_item['items'][2]
+        mutations.append(missing_item)
+        for field in ('unresolved', 'counts'):
+            wrong_count = self.prepared()
+            if field == 'unresolved':
+                wrong_count[field] = 3
+            else:
+                wrong_count[field]['review_required'] = 3
+            mutations.append(wrong_count)
+        for index, result in enumerate(mutations):
+            with self.subTest(mutation=index), self.assertRaises(ValueError):
+                report.remaining_reviews(result)
+
+    def test_short_value_is_ascii_and_its_total_length_includes_the_clipping_marker(self):
+        escaped = report.short_value({'message': '\x1b[31m\n\tПривет'}, 120)
+        self.assertTrue(escaped.isascii())
+        self.assertNotIn('\x1b', escaped)
+        self.assertNotIn('\n', escaped)
+        self.assertNotIn('\t', escaped)
+        self.assertIn('\\u001b', escaped)
+        self.assertEqual(json.loads(escaped), {'message': '\x1b[31m\n\tПривет'})
+        for limit in (40, 120):
+            clipped = report.short_value({'message': 'x' * 10000}, limit)
+            with self.subTest(limit=limit):
+                self.assertLessEqual(len(clipped), limit)
+                self.assertIn('clipped', clipped)
+                self.assertTrue(clipped.isascii())
+
+    def test_compact_output_contains_only_three_reviews_and_counts_all_alternatives(self):
+        result = self.prepared()
+        for _, item in report.remaining_reviews(result):
+            template = item['inspection']['review']['alternatives'][0]
+            alternatives = []
+            for index, (display_match, state_match) in enumerate(((False, False), (True, False), (False, True))):
+                alternative = deepcopy(template)
+                alternative['index'] = index
+                alternative['delivered']['equal'] = display_match
+                alternative['semantic']['equal'] = state_match
+                alternatives.append(alternative)
+            item['inspection']['review']['alternatives'] = alternatives
+        text = self.rendered(result)
+        for index, item in report.remaining_reviews(result):
+            self.assertIn(f'[{index}]', text)
+            self.assertIn(item['case_id'], text)
+        self.assertNotIn('[2]', text)
+        self.assertNotIn('contract_not_implemented', text)
+        self.assertNotIn('invalid_arguments', text)
+        self.assertIn('4', text)
+        self.assertIn('3', text)
+        self.assertGreaterEqual(text.count('display_match'), 3)
+        self.assertGreaterEqual(text.count('state_match'), 3)
+        self.assertGreaterEqual(text.count('both_match'), 3)
+        self.assertEqual(text.count('All 3 alternatives: display_match=1; state_match=1; both_match=0.'), 3)
+        self.assertIn('Question:', text)
+        self.assertIn('repeat_answer', text)
+        self.assertIn('TR', text)
+        for _, item in report.remaining_reviews(result):
+            item['inspection']['review']['alternatives'][1]['delivered']['equal'] = False
+            item['inspection']['review']['alternatives'][2]['semantic']['equal'] = False
+        self.assertNotEqual(text, self.rendered(result))
+
+    def test_last_of_256_alternatives_contributes_to_totals_without_expanding_output(self):
+        result = self.prepared()
+        for _, item in report.remaining_reviews(result):
+            review = item['inspection']['review']
+            template = review['alternatives'][0]
+            review['alternatives'] = []
+            for index in range(256):
+                alternative = deepcopy(template)
+                alternative['index'] = index
+                alternative['delivered']['equal'] = index == 255
+                alternative['semantic']['equal'] = index == 255
+                review['alternatives'].append(alternative)
+        text = self.rendered(result)
+        self.assertEqual(text.count('All 256 alternatives: display_match=1; state_match=1; both_match=1.'), 3)
+        self.assertEqual(text.count('Frozen alternative 0/256'), 3)
+        self.assertNotIn('Frozen alternative 255/', text)
+        self.assertLessEqual(len(text), 6500)
+
+    def test_large_fields_stay_short_and_terminal_control_characters_are_escaped(self):
+        result = self.prepared()
+        large = '\x1b[31m\n\tПривет' + 'x' * 30000
+        for _, item in report.remaining_reviews(result):
+            item['question'] = large
+            item['inspection']['model_calls'][0]['arguments']['untrusted'] = large
+            item['context'] = {
+                'exchanges': [{'id': f'e{index}', 'question': large, 'assistant': large,
+                               'model_calls': [{'name': 'history_call', 'arguments': {'text': large}}]}
+                              for index in range(4)],
+                'omitted_exchanges': 20,
+                'referenced_answers': [{'id': 't2.c1', 'text': large}],
+                'pending': [{'text': large}]}
+            review = item['inspection']['review']
+            review['actual']['delivered'] = large
+            template = review['alternatives'][0]
+            review['alternatives'] = []
+            for index in range(3):
+                alternative = deepcopy(template)
+                alternative['index'] = index
+                alternative['calls'][0]['arguments']['untrusted'] = large
+                alternative['expected']['delivered'] = large + 'changed'
+                alternative['semantic']['entries'] = [
+                    {'path': f'turns[{entry}].subject', 'actual': large, 'expected': large + 'changed'}
+                    for entry in range(16)]
+                alternative['semantic']['truncated'] = True
+                review['alternatives'].append(alternative)
+        before = deepcopy(result)
+        text = self.rendered(result)
+        self.assertLessEqual(len(text), 6500)
+        self.assertTrue(text.isascii())
+        self.assertNotIn('\x1b', text)
+        self.assertNotIn('\t', text)
+        self.assertIn('\\u001b', text)
+        self.assertIn('clipped', text)
+        self.assertIn('sample', text.lower())
+        self.assertGreaterEqual(text.count('display_match'), 3)
+        self.assertGreaterEqual(text.count('state_match'), 3)
+        self.assertEqual(result, before)
+
+    def test_reply_snippet_starts_four_characters_before_the_actual_mismatch(self):
+        result = self.prepared()
+        selected = report.remaining_reviews(result)[0][1]
+        review = selected['inspection']['review']
+        prefix = 'OLD_PREFIX_NOT_NEAR_DIFFERENCE' + 'x' * 140
+        context = 'CTX_'
+        actual = prefix + context + 'ACTUAL_MISMATCH' + 'z' * 100
+        expected = prefix + context + 'EXPECTED_MISMATCH' + 'z' * 100
+        difference = len(prefix + context)
+        review['actual']['delivered'] = actual
+        alternative = review['alternatives'][0]
+        alternative['expected']['delivered'] = expected
+        alternative['delivered'].update(
+            first_difference=difference, actual_chars=len(actual), expected_chars=len(expected),
+            actual_excerpt=actual[difference - 80:difference + 80],
+            expected_excerpt=expected[difference - 80:difference + 80])
+        text = self.rendered(result)
+        self.assertIn(context + 'ACTUAL_MISMATCH', text)
+        self.assertIn(context + 'EXPECTED_MISMATCH', text)
+        self.assertNotIn('x' + context, text)
+        self.assertNotIn('OLD_PREFIX_NOT_NEAR_DIFFERENCE', text)
+
+    def test_reply_snippet_converts_saved_utf16_offset_before_clipping_escaped_emoji(self):
+        result = self.prepared()
+        review = report.remaining_reviews(result)[0][1]['inspection']['review']
+        prefix = 'prefix' + '\U0001f600' * 100
+        actual = prefix + 'ACTUAL_MISMATCH' + 'x' * 100
+        expected = prefix + 'EXPECTED_MISMATCH' + 'x' * 100
+        review['actual']['delivered'] = actual
+        alternative = review['alternatives'][0]
+        alternative['expected']['delivered'] = expected
+        alternative['delivered']['first_difference'] = len(prefix.encode('utf-16-le')) // 2
+        text = self.rendered(result)
+        escaped_context = '\\ud83d\\ude00' * 4
+        self.assertIn(escaped_context + 'ACTUAL_MISMATCH', text)
+        self.assertIn(escaped_context + 'EXPECTED_MISMATCH', text)
+        self.assertNotIn('\U0001f600', text)
+
+
+class CommandLineTests(unittest.TestCase):
+    def test_remaining_reviews_uses_authenticated_loader_and_specialized_display(self):
+        result = RemainingReviewTests.prepared()
+        with patch.object(report, 'load_report', return_value=result) as load:
+            with patch.object(report, 'show_remaining_reviews') as remaining:
+                with patch.object(report, 'show') as normal:
+                    with patch('sys.argv', ['inspect_qwen_cases.py', '--remaining-reviews']):
+                        report.main()
+        load.assert_called_once_with()
+        remaining.assert_called_once_with(result)
+        normal.assert_not_called()
+
+    def test_full_and_default_display_routes_remain_available(self):
+        result = RemainingReviewTests.prepared()
+        for argv, full in (([], False), (['--full'], True)):
+            with self.subTest(argv=argv), patch.object(report, 'load_report', return_value=result) as load:
+                with patch.object(report, 'show_remaining_reviews') as remaining:
+                    with patch.object(report, 'show') as normal:
+                        with patch('sys.argv', ['inspect_qwen_cases.py', *argv]):
+                            report.main()
+            load.assert_called_once_with()
+            normal.assert_called_once_with(result, full=full)
+            remaining.assert_not_called()
+
+    def test_remaining_reviews_and_full_are_mutually_exclusive_before_loading(self):
+        with patch.object(report, 'load_report') as load:
+            with patch('sys.argv', ['inspect_qwen_cases.py', '--remaining-reviews', '--full']):
+                with patch('sys.stderr', new=io.StringIO()), self.assertRaises(SystemExit) as error:
+                    report.main()
+        self.assertEqual(error.exception.code, 2)
+        load.assert_not_called()
+
+
 class CompleteReportTests(fixtures.Fixture):
     prepare = saved_fixtures.SavedReportTests.prepare
     prohibit_inference = saved_fixtures.SavedReportTests.prohibit_inference

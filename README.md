@@ -36,6 +36,14 @@ This checks all 32 saved identities and receipts before inspecting the 13 select
 
 The short output explicitly marks clipped context. `--full` prints complete selected histories and diagnostic JSON, including complete actual/expected states for unresolved cases. It only writes to the terminal. Run in the same private checkout and environment; no additional dependencies or assets are needed. Offline checks: `./cluster python -m unittest test_inspect_qwen_cases` and `./cluster node --test test_inspect_qwen_cases.mjs`.
 
+To copy the **three remaining disputed cases together** after discussing the first review:
+
+```sh
+./cluster git pull --ff-only && ./cluster python inspect_qwen_cases.py --remaining-reviews
+```
+
+This compact view excludes only the already displayed `control:history-v3-train-error_and_success-18-fresh_after_success-control` case. It does not resolve or remove any of the four saved review flags. Each remaining case shows its question, brief context, Qwen calls, the first frozen allowed program, and display/state/both match counts across **all** alternatives. Reply excerpts surround the first mismatch against alternative zero; state paths are explicitly sampled. Long fields are marked as clipped; complete evidence remains available with `--full`. Original numbering is retained. Authentication and CPU replay are unchanged, and no model is run.
+
 ## Finish the stopped current comparison
 
 The original `history --repair-parity` command retains its 36-hour budget and returns an existing `budget_stopped` result. The user authorized completing both current arms and their checks regardless of duration on 2026-11-16. Once that coordinator has exited, use the separate continuation below inside the same personal checkout and original Python environment:
