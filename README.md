@@ -28,6 +28,14 @@ Repeat `./cluster python -u finish_history.py --gpus 4` after an interruption wi
 
 ## TRAIN fit and stronger reference
 
+To inspect a completed reference admission, including `TRAIN_FIT_COMPLETE_REFERENCE_NOT_QUALIFIED`, run:
+
+```sh
+./cluster python inspect_reference.py
+```
+
+The reporter reads the saved identities, qualification receipt and all 32 responses, verifies their hashes and counts, then prints failed conditions and two bounded response excerpts. It distinguishes insufficient valid native formats from zero complete supported answers. It does not load models, access the network, rerun evaluations or change saved results. A newer reporting-only Git commit is allowed; the original saved experiment identity remains authoritative. Use `--examples 0` for counts only or `--examples 4` for more examples.
+
 Run this diagnostic **after the actual-history comparison has finished**, using the continuation above if it stopped on time. Keep the checkout unchanged while a coordinator is running. The diagnostic requires a saved terminal result containing the baseline and both complete seed-1729 arms; it refuses partial pairs and an active execution lease before downloading any model. The diagnostic itself does not resume, retrain or modify the history experiment.
 
 Inside your personal `vsavin/for-mu-cluster` checkout, with the existing environment active:
@@ -89,6 +97,7 @@ Local checks before publication cover recovered contexts, equivalent programs, c
 | `cluster`, `private_runtime.py` | Launch commands with temporary files and dependency caches confined to `.runtime/` in this checkout. |
 | `diagnose.py`, `diagnose-data.mjs`, `diagnose-dev.mjs` | Post-run TRAIN-fit measurement and four-GPU reference comparison. |
 | `finish_history.py` | Finish the existing seed-1729 pair without an elapsed-time cutoff, preserving its original protocol and records. |
+| `inspect_reference.py` | Read a completed reference-admission report and display verified counts and short failed-response examples. |
 | `reference_model.py` | Pinned local Qwen download, transport adapter and bounded-memory inference. |
 | `assets/diagnostic-train-contexts.*` | Exact restored TRAIN histories and their provenance; no new training examples. |
 
