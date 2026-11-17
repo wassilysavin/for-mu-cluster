@@ -289,6 +289,50 @@ class ReportTests(unittest.TestCase):
 
 class RemainingReviewTests(unittest.TestCase):
     @staticmethod
+    def shifted_history():
+        return {'exchanges': [
+            {'id': 'e1', 'outcome': 'committed', 'semantic_turn_id': 't1'},
+            {'id': 'e2', 'outcome': 'committed', 'semantic_turn_id': 't2'},
+            {'id': 'e3', 'outcome': 'committed', 'semantic_turn_id': 't3'},
+            {'id': 'e4', 'outcome': 'error', 'error_code': 'invalid_arguments'},
+            {'id': 'e5', 'outcome': 'committed', 'semantic_turn_id': 't4'}],
+            'semantic': {'turns': [
+                {'id': 't4', 'answers': [{'id': 't4.c1'}], 'response_parts': [{'kind': 'answer'}]},
+                {'id': 't3', 'answers': [], 'response_parts': [{'kind': 'replayed_exchange'}]},
+                {'id': 't2', 'answers': [], 'response_parts': [{'kind': 'reference_clarification'}]},
+                {'id': 't1', 'answers': [{'id': 't1.c1'}], 'response_parts': [{'kind': 'answer'}]}]}}
+
+    def test_exchange_map_keeps_failures_and_resolves_turns_by_id_not_position(self):
+        item = {'before': self.shifted_history()}
+        before = deepcopy(item)
+        self.assertEqual(report.exchange_map(item), [
+            ['e1', 'committed', None, 't1', ['t1.c1'], ['answer']],
+            ['e2', 'committed', None, 't2', [], ['reference_clarification']],
+            ['e3', 'committed', None, 't3', [], ['replayed_exchange']],
+            ['e4', 'error', 'invalid_arguments', None, [], []],
+            ['e5', 'committed', None, 't4', ['t4.c1'], ['answer']]])
+        self.assertEqual(item, before)
+
+    def test_brief_view_prints_all_exchanges_even_if_context_excluded_them(self):
+        result = self.prepared()
+        for _, item in report.remaining_reviews(result):
+            item['before'] = self.shifted_history()
+            item['context']['exchanges'] = [item['before']['exchanges'][0], item['before']['exchanges'][-1]]
+        before = deepcopy(result)
+        text = self.rendered(result)
+        for _, item in report.remaining_reviews(result):
+            self.assertIn(report.compact(report.exchange_map(item)), text)
+        self.assertEqual(text.count('All exchanges [id, outcome, error, turn, answer IDs, part kinds]:'), 3)
+        self.assertLessEqual(len(text), 6500)
+        self.assertEqual(result, before)
+
+    def test_missing_semantic_turn_in_exchange_map_is_rejected(self):
+        item = {'before': self.shifted_history()}
+        item['before']['exchanges'][-1]['semantic_turn_id'] = 't99'
+        with self.assertRaisesRegex(ValueError, 'missing semantic turn'):
+            report.exchange_map(item)
+
+    @staticmethod
     def prepared():
         cases, rows = targeted_cases()
         result = report.build_report(cases, rows, InspectionRPC())

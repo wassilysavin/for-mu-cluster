@@ -205,6 +205,21 @@ def reply_excerpt(text, utf16_offset):
     return text[max(0, position - 4):position + 76]
 
 
+def exchange_map(item):
+    before = item['before']
+    turns = {turn['id']: turn for turn in before.get('semantic', {}).get('turns', [])}
+    result = []
+    for exchange in before.get('exchanges', []):
+        turn_id = exchange.get('semantic_turn_id')
+        if turn_id is not None and turn_id not in turns:
+            raise ValueError('Saved exchange refers to a missing semantic turn')
+        turn = turns.get(turn_id, {})
+        result.append([exchange['id'], exchange['outcome'], exchange.get('error_code'), turn_id,
+                       [answer['id'] for answer in turn.get('answers', [])],
+                       [part['kind'] for part in turn.get('response_parts', [])]])
+    return result
+
+
 def show_remaining_reviews(report):
     selected = remaining_reviews(report)
     print('Remaining for discussion: 3/4 saved reviews. Previously displayed case excluded only from this view.')
@@ -215,13 +230,9 @@ def show_remaining_reviews(report):
         if not alternatives:
             raise ValueError('Saved review has no frozen alternatives')
         first = alternatives[0]
-        context = {'history': [[exchange.get('id'), exchange.get('question'), exchange.get('model_calls')]
-                               for exchange in item['context']['exchanges']],
-                   'pending': item['context']['pending'],
-                   'other_exchanges': item['context']['omitted_exchanges']}
         print(f'[{index}] ' + short_value(item['case_id'], 120))
         print('  Question:', short_value(item['question'], 260))
-        print('  Context (id, question, calls):', short_value(context, 260))
+        print('  All exchanges [id, outcome, error, turn, answer IDs, part kinds]:', compact(exchange_map(item)))
         print('  Qwen:', short_value(inspection['model_calls'], 340))
         print(f'  Frozen alternative {first["index"]}/{len(alternatives)} (zero-based):',
               short_value(first['calls'], 340))
