@@ -18,6 +18,14 @@ Every original response and token ID is saved. Only a complete, valid Hermes bat
 
 Use `./cluster python -u qualify_reference.py --gpus 4` to resume after interruption, without pulling new code. Saved responses are verified and reused; a completed run only verifies and displays its report without loading a model. Run inside your existing private tmux session if you may disconnect. Offline checks: `./cluster python -m unittest test_qwen_transport test_qualify_reference test_inspect_reference`.
 
+To explain the saved nonpassing answers without running Qwen again:
+
+```sh
+./cluster git pull --ff-only && ./cluster python inspect_qwen_failures.py
+```
+
+The reporter authenticates all 32 saved observations and reproduces their deterministic executor scores on CPU. It prints recorded failures, critical and unresolved counts, structural differences in calls/arguments, and four representative examples. Comparisons consider every frozen allowed program, preserve duplicate calls and distinguish argument types. Structural signals can overlap and are measured against a closest allowed program; ambiguous alignments are reported. These signals are debugging clues, not independent adjudication of unresolved answers or proof that a scientific label is correct. Passed semantic equivalents are not relabeled as failures. `--all` lists one short line for every nonpassing case; `--examples 0` prints only the aggregate report. No model, CUDA, weight download or saved-result write is involved. Tests: `./cluster python -m unittest test_inspect_qwen_failures`.
+
 ## Finish the stopped current comparison
 
 The original `history --repair-parity` command retains its 36-hour budget and returns an existing `budget_stopped` result. The user authorized completing both current arms and their checks regardless of duration on 2026-11-16. Once that coordinator has exited, use the separate continuation below inside the same personal checkout and original Python environment:
@@ -115,6 +123,7 @@ Local checks before publication cover recovered contexts, equivalent programs, c
 | `finish_history.py` | Finish the existing seed-1729 pair without an elapsed-time cutoff, preserving its original protocol and records. |
 | `inspect_reference.py` | Read a completed reference-admission report and display verified counts and short failed-response examples. |
 | `qualify_reference.py`, `qwen_transport.py` | Recheck only the same 32 TRAIN cases using Qwen Hermes output and the existing weights. |
+| `inspect_qwen_failures.py` | Explain saved qualification failures and call/argument differences without model inference. |
 | `reference_model.py` | Pinned local Qwen download, transport adapter and bounded-memory inference. |
 | `assets/diagnostic-train-contexts.*` | Exact restored TRAIN histories and their provenance; no new training examples. |
 
