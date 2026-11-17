@@ -26,6 +26,16 @@ To explain the saved nonpassing answers without running Qwen again:
 
 The reporter authenticates all 32 saved observations and reproduces their deterministic executor scores on CPU. It prints recorded failures, critical and unresolved counts, structural differences in calls/arguments, and four representative examples. Comparisons consider every frozen allowed program, preserve duplicate calls and distinguish argument types. Structural signals can overlap and are measured against a closest allowed program; ambiguous alignments are reported. These signals are debugging clues, not independent adjudication of unresolved answers or proof that a scientific label is correct. Passed semantic equivalents are not relabeled as failures. `--all` lists one short line for every nonpassing case; `--examples 0` prints only the aggregate report. No model, CUDA, weight download or saved-result write is involved. Tests: `./cluster python -m unittest test_inspect_qwen_failures`.
 
+For the reported **one missing contract, four unresolved answers and eight argument errors**:
+
+```sh
+./cluster git pull --ff-only && ./cluster python inspect_qwen_cases.py
+```
+
+This checks all 32 saved identities and receipts before inspecting the 13 selected cases. It prints their exact questions, saved calls, relevant history excerpts, and the compiler/executor's actual error messages. Dynamic argument schemas use the original conversation state. A missing exact source binding is distinguished from a schema violation; existing binding examples do not establish the intended answer. Each unresolved answer is compared with every frozen allowed program, separating delivered-text differences from dialogue-state differences. Reviews remain unresolved and original scores stay unchanged. This is CPU replay of saved calls, with no model, GPU, download, training or new DEV generation.
+
+The short output explicitly marks clipped context. `--full` prints complete selected histories and diagnostic JSON, including complete actual/expected states for unresolved cases. It only writes to the terminal. Run in the same private checkout and environment; no additional dependencies or assets are needed. Offline checks: `./cluster python -m unittest test_inspect_qwen_cases` and `./cluster node --test test_inspect_qwen_cases.mjs`.
+
 ## Finish the stopped current comparison
 
 The original `history --repair-parity` command retains its 36-hour budget and returns an existing `budget_stopped` result. The user authorized completing both current arms and their checks regardless of duration on 2026-11-16. Once that coordinator has exited, use the separate continuation below inside the same personal checkout and original Python environment:
@@ -124,6 +134,7 @@ Local checks before publication cover recovered contexts, equivalent programs, c
 | `inspect_reference.py` | Read a completed reference-admission report and display verified counts and short failed-response examples. |
 | `qualify_reference.py`, `qwen_transport.py` | Recheck only the same 32 TRAIN cases using Qwen Hermes output and the existing weights. |
 | `inspect_qwen_failures.py` | Explain saved qualification failures and call/argument differences without model inference. |
+| `inspect_qwen_cases.py`, `inspect_qwen_cases.mjs` | Trace the 13 selected saved failures, exact schema/binding errors and unresolved answer/state differences. |
 | `reference_model.py` | Pinned local Qwen download, transport adapter and bounded-memory inference. |
 | `assets/diagnostic-train-contexts.*` | Exact restored TRAIN histories and their provenance; no new training examples. |
 
