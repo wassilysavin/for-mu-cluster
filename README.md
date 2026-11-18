@@ -2,6 +2,22 @@
 
 This repository contains frozen FunctionGemma experiments and a separate post-run diagnostic for NVIDIA V100 GPUs. The diagnostic measures TRAIN fit and compares the completed history experiment with a pinned Qwen3-1.7B reference. Earlier experiments and their inputs remain available. Every training course requires a successful FP32 pilot.
 
+## Compare paraphrases and semantic contrasts on four V100s
+
+From your existing checkout of `train-fit-reference-v1` with the project environment active, run this in your cluster tmux session:
+
+```sh
+./cluster git pull --ff-only && ./cluster python -u transfer_run.py --gpus 4
+```
+
+Both arms start from the saved FunctionGemma treatment checkpoint at step 7991 with its FP32 optimizer state. Each trains for 160 updates of four examples, using four V100s together. The runner completes the arms sequentially under one lease. It checks the saved cluster artifacts and disk allowance, runs a numerical pilot, and resumes recorded progress when the same command is repeated. All transfer artifacts are inside this checkout. The combined additional disk budget is 3 GB, including the existing reference-model cache and reserve.
+
+The two TRAIN files use the same 160 dialogue roots and the same overall distribution of wording and intended actions. The ordinary arm pairs two paraphrases of one request with a history. The contrast arm pairs two different requests with that history. For example, a user can ask to quote the displayed failure or retry the underlying question. Each arm has 320 variable presentations and 320 common replay examples. Half of the variable presentations also coincide across arms. Sixteen roots use saved student histories. The runner reconstructs the other 144 and verifies native targets and prompt/target token balance before training.
+
+The new DEV contains 161 primary turns, including 24 four-turn dialogues, and a separate 72-case panel with controlled histories. Each candidate generates its own dialogue history. The report compares full delivered answers and dialogue state, whole dialogues, outside-scope handling, critical errors and unresolved reviews. It also checks the frozen DEV155 and DEV1250 regressions. The first seed is 1729. A gain of at least five percentage points on supported primary turns, a positive lower family-bootstrap confidence bound, more complete dialogues and passing regression guards trigger the confirmatory pair with seed 2718. The terminal prints the effect and interval. The complete comparison is saved in `runs/semantic-transfer-v1/result.json`.
+
+The dataset declarations are in `assets/transfer-train-*.jsonl` and `assets/transfer-dev-v1.json`. The CPU preflight is `./cluster python transfer_run.py --check`. The new DEV is public and diagnostic. The independent product TEST remains closed.
+
 ## Inspect saved FunctionGemma errors on DEV1250
 
 From the existing `train-fit-reference-v1` checkout on the cluster, run:
