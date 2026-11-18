@@ -28,6 +28,20 @@ From the same checkout with the environment active, print the report with one co
 
 The report pairs cases by ID across the original step 7991 and both trained arms. It prints gains and losses for supported turns, complete dialogues, outside-scope requests and the fixed-history challenge panel. A breakdown by request type includes retries and ambiguous references even when their totals did not change. Examples show all three verdicts and whether the two trained arms saw the same prior conversation. The final two model-table columns give supported scores on DEV155 and the closed-loop portion of DEV1250. The script reads saved observations and verifies their hashes. It requires the existing run folders and uses CPU only.
 
+### Measure TRAIN fit after 160 updates
+
+From the same checkout, evaluate the saved step-8151 checkpoints with the four cluster GPUs:
+
+```sh
+./cluster git pull --ff-only && ./cluster python -u check_new_train_fit.py --gpus 4
+```
+
+Each branch generates answers from its exact saved training prompts. The four GPUs divide the examples for one checkpoint at a time. The diagnostic checks 320 new examples and 320 shared replay examples per arm. Within the new examples it separately counts identical prompt–target pairs present in the other arm and pairs unique to this arm. A pass requires the expected delivered answer and resulting dialogue state. The report includes exact calls, unresolved reviews, critical errors, and a breakdown by request type.
+
+The saved fresh DEV score provides a transfer check. High fit on branch-unique TRAIN alongside low DEV suggests prioritizing generalization. When many training answers still fail, inspect those errors before testing extra updates against the current checkpoint. The 90% threshold is a diagnostic guide. Each arm has its own new cases, so the unique-case scores alone cannot establish which training method is better.
+
+Results are written under `runs/new-train-fit-v1/` within the existing disk allowance. Repeating the command verifies and reuses saved generations. It performs no training and uses the existing DEV report without regenerating answers.
+
 ## Inspect saved FunctionGemma errors on DEV1250
 
 From the existing `train-fit-reference-v1` checkout on the cluster, run:
