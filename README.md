@@ -2,6 +2,16 @@
 
 This repository contains frozen FunctionGemma experiments and a separate post-run diagnostic for NVIDIA V100 GPUs. The diagnostic measures TRAIN fit and compares the completed history experiment with a pinned Qwen3-1.7B reference. Earlier experiments and their inputs remain available. Every training course requires a successful FP32 pilot.
 
+## Inspect saved FunctionGemma errors on DEV1250
+
+From the existing `train-fit-reference-v1` checkout on the cluster, run:
+
+```sh
+./cluster git pull --ff-only && ./cluster python inspect_student_errors.py
+```
+
+The report checks the completed baseline, control and treatment against their saved receipts and replays their recorded outputs on the CPU. It prints panel totals, recorded failure categories, differences between calls, and case-level gains and losses. Error details default to supported closed-loop cases. Use `--panel fixed_prefix` or `--panel challenge` for the other panels. Counts of call differences can overlap. Each model saw its own conversation history. The command prints to the terminal and requires the original cluster run files.
+
 ## Recheck Qwen format on the same 32 TRAIN cases
 
 After `TRAIN_FIT_COMPLETE_REFERENCE_NOT_QUALIFIED`, run this in the existing environment and checkout:
