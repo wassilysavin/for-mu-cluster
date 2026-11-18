@@ -18,6 +18,16 @@ The new DEV contains 161 primary turns, including 24 four-turn dialogues, and a 
 
 The dataset declarations are in `assets/transfer-train-*.jsonl` and `assets/transfer-dev-v1.json`. The CPU preflight is `./cluster python transfer_run.py --check`. The new DEV is public and diagnostic. The independent product TEST remains closed.
 
+### Compare the saved outcomes
+
+From the same checkout with the environment active, print the report with one command:
+
+```sh
+./cluster git pull --ff-only && ./cluster python inspect_transfer.py
+```
+
+The report pairs cases by ID across the original step 7991 and both trained arms. It prints gains and losses for supported turns, complete dialogues, outside-scope requests and the fixed-history challenge panel. A breakdown by request type includes retries and ambiguous references even when their totals did not change. Examples show all three verdicts and whether the two trained arms saw the same prior conversation. The final two model-table columns give supported scores on DEV155 and the closed-loop portion of DEV1250. The script reads saved observations and verifies their hashes. It requires the existing run folders and uses CPU only.
+
 ## Inspect saved FunctionGemma errors on DEV1250
 
 From the existing `train-fit-reference-v1` checkout on the cluster, run:
