@@ -2,6 +2,24 @@
 
 This repository contains frozen FunctionGemma experiments and a separate post-run diagnostic for NVIDIA V100 GPUs. The diagnostic measures TRAIN fit and compares the completed history experiment with a pinned Qwen3-1.7B reference. Earlier experiments and their inputs remain available. Every training course requires a successful FP32 pilot.
 
+## Weekly TRAIN for FunctionGemma
+
+`assets/week-train-v1.jsonl` is the complete native supervised dataset. It contains 5,169 distinct training inputs. There are 2,957 curated replay cases, 1,472 new dialogue continuations and 740 new scientific multi-part questions. The dialogues cover repeating a displayed reply or a single answer, retrying after failure, revising an argument, and asking for clarification. Scientific compositions preserve the requested order of two or three obligations. The 2,212 new rows reuse scientific facts and questions from TRAIN anchors.
+
+From the existing checkout on the cluster, after storage access is restored, run
+
+```sh
+./cluster git fetch origin && ./cluster git switch week-train-v1 && ./cluster git pull --ff-only && ./cluster python -u week_train.py check
+```
+
+This CPU check reads the published dataset and validates every native token receipt. Developer prefixes reference shared text fragments. Both prefixes and fragments are stored once in this UTF-8 JSONL. Each `example` contains the user's question, the complete user-turn suffix with the displayed history, the native target, the expected calls and the original TRAIN IDs. The summary records corpus counts and the body checksum. The published file is 20,927,555 bytes, with SHA-256 `5187779fc940c9ff19adaa90fee2233b9ea5815a5acb74420b0f012af12ae50e`. The Python reader `week_train.iter_batches(updates=..., seed=1729)` reconstructs exact `input_ids` and `prompt_tokens`, shuffles cases reproducibly per epoch, and carries leftover examples across epochs to fill batches of four. The loss applies only to tokens after the prompt boundary.
+
+**Planned experiment.** First complete the existing step-8151 TRAIN-fit diagnostic. Keep step 7991 as the weekly baseline. Compare +160 updates on the weekly set with the baseline on the same DEV, then evaluate after the first full pass (+1,293 updates). A second pass (+2,585 cumulative updates) is worth testing if longer training is improving transfer and preserving previously supported tasks. Examine complete dialogues, literal quotations, critical errors, out-of-scope requests, unresolved reviews and earlier DEV regressions alongside supported answers. If TRAIN is already well learned and DEV stalls, investigate the first divergent turn on actual model trajectories.
+
+The proposed limit is 168 elapsed hours for the whole experiment on four V100s, including evaluations. As a planning allowance, allocate up to 120 hours for training and 48 for diagnostics, evaluation and interruptions. A previous 2,358-update course took 15.83 hours including three DEV155 checks. At an assumed 25–35 seconds per update the first pass is about 9–13 training hours before separate evaluations. Measure throughput on this corpus before scheduling later checkpoints. This branch publishes the dataset and reader; the check command does not start a timed training job.
+
+The 1,472 new dialogue rows use 384 authored history families and recurring language patterns. The 740 compositions use 370 families, including both orderings. Executing gold calls verifies compatibility with the frozen application. Independent scientific adjudication and performance on real user dialogues require separate evidence.
+
 ## Compare paraphrases and semantic contrasts on four V100s
 
 From your existing checkout of `train-fit-reference-v1` with the project environment active, run this in your cluster tmux session:
