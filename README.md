@@ -2,7 +2,19 @@
 
 This repository contains frozen FunctionGemma experiments and a separate post-run diagnostic for NVIDIA V100 GPUs. The diagnostic measures TRAIN fit and compares the completed history experiment with a pinned Qwen3-1.7B reference. Earlier experiments and their inputs remain available. Every training course requires a successful FP32 pilot.
 
-## Weekly TRAIN for FunctionGemma
+## Expanded weekly TRAIN and its size comparison
+
+The full dataset is `assets/week-train-v2.jsonl`. It preserves the original 5,169 examples and adds continuations of recorded histories, scientific questions with changing conditions, and mixed-scope requests. The data reader also supplies a 5,169-example subset drawn from this expanded mix for the size comparison. Both arms receive four examples per optimizer update and the same order of task types and token-length bins. The small arm revisits more examples.
+
+From the existing cluster checkout, once its filesystem is accessible, fetch the dataset and verify all examples on CPU with one command.
+
+```sh
+./cluster git fetch origin && ./cluster git switch week-train-v2 && ./cluster git pull --ff-only && ./cluster python -u extended_train.py check
+```
+
+Use `extended_train.iter_batches(arm="full", updates=..., seed=1729)` or `arm="matched"` for the planned experiment. The command above validates the data. The corpus profile, balance of the two schedules, research review, known limitations and evaluation plan are in the [dataset audit](TRAIN-AUDIT.md). To reproduce the corpus inventory, exact-wording probe and schedule totals, run `./cluster python audit_week_train.py`.
+
+## Original weekly TRAIN for FunctionGemma
 
 `assets/week-train-v1.jsonl` is the complete native supervised dataset. It contains 5,169 distinct training inputs. There are 2,957 curated replay cases, 1,472 new dialogue continuations and 740 new scientific multi-part questions. The dialogues cover repeating a displayed reply or a single answer, retrying after failure, revising an argument, and asking for clarification. Scientific compositions preserve the requested order of two or three obligations. The 2,212 new rows reuse scientific facts and questions from TRAIN anchors.
 
