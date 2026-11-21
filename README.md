@@ -6,10 +6,10 @@ This repository contains frozen FunctionGemma experiments and a separate post-ru
 
 The full dataset is `assets/week-train-v2.jsonl`. It preserves the original 5,169 examples and adds continuations of recorded histories, scientific questions with changing conditions, and mixed-scope requests. The data reader also supplies a 5,169-example subset drawn from this expanded mix for the size comparison. Both arms receive four examples per optimizer update and the same order of task types and token-length bins. The small arm revisits more examples.
 
-From the existing cluster checkout, once its filesystem is accessible, fetch the dataset and verify all examples on CPU with one command.
+To verify every example on CPU from this checkout, run
 
 ```sh
-./cluster git fetch origin && ./cluster git switch week-train-v2 && ./cluster git pull --ff-only && ./cluster python -u extended_train.py check
+./cluster python -u extended_train.py check
 ```
 
 Use `extended_train.iter_batches(arm="full", updates=..., seed=1729)` or `arm="matched"` for the planned experiment. The command above validates the data. The corpus profile, balance of the two schedules, research review, known limitations and evaluation plan are in the [dataset audit](TRAIN-AUDIT.md). To reproduce the corpus inventory, exact-wording probe and schedule totals, run `./cluster python audit_week_train.py`.
@@ -72,15 +72,9 @@ The saved fresh DEV score provides a transfer check. High fit on branch-unique T
 
 Results are written under `runs/new-train-fit-v1/` within the existing disk allowance. Repeating the command verifies and reuses saved generations. It performs no training and uses the existing DEV report without regenerating answers.
 
-## Inspect saved FunctionGemma errors on DEV1250
+## Earlier error reports
 
-From the existing `train-fit-reference-v1` checkout on the cluster, run:
-
-```sh
-./cluster git pull --ff-only && ./cluster python inspect_student_errors.py
-```
-
-The report checks the completed baseline, control and treatment against their saved receipts and replays their recorded outputs on the CPU. It prints panel totals, recorded failure categories, differences between calls, and case-level gains and losses. Error details default to supported closed-loop cases. Use `--panel fixed_prefix` or `--panel challenge` for the other panels. Counts of call differences can overlap. Each model saw its own conversation history. The command prints to the terminal and requires the original cluster run files.
+The previous version includes the scripts and instructions for inspecting saved [FunctionGemma DEV1250 errors](https://github.com/wassilysavin/for-mu-cluster/blob/013f8878f9658229f1c65d72af2a314db7631b7b/README.md#inspect-saved-functiongemma-errors-on-dev1250) and [Qwen qualification errors](https://github.com/wassilysavin/for-mu-cluster/blob/013f8878f9658229f1c65d72af2a314db7631b7b/README.md#recheck-qwen-format-on-the-same-32-train-cases).
 
 ## Recheck Qwen format on the same 32 TRAIN cases
 
@@ -97,32 +91,6 @@ The adapter requests Qwen's documented [Hermes JSON tool-call format](https://qw
 Every original response and token ID is saved. Only a complete, valid Hermes batch ending at the model's EOS is serialized into the executor's native format. Names, arguments, types and order remain model-selected; prose, malformed JSON, duplicate keys and unfinished batches are failures, not repaired outputs. Admission still requires at least **30/32 valid batches and one complete supported answer**. Passing this check does not start any further experiment or establish domain quality or product acceptance.
 
 Use `./cluster python -u qualify_reference.py --gpus 4` to resume after interruption, without pulling new code. Saved responses are verified and reused; a completed run only verifies and displays its report without loading a model. Run inside your existing private tmux session if you may disconnect. Offline checks: `./cluster python -m unittest test_qwen_transport test_qualify_reference test_inspect_reference`.
-
-To explain the saved nonpassing answers without running Qwen again:
-
-```sh
-./cluster git pull --ff-only && ./cluster python inspect_qwen_failures.py
-```
-
-The reporter authenticates all 32 saved observations and reproduces their deterministic executor scores on CPU. It prints recorded failures, critical and unresolved counts, structural differences in calls/arguments, and four representative examples. Comparisons consider every frozen allowed program, preserve duplicate calls and distinguish argument types. Structural signals can overlap and are measured against a closest allowed program; ambiguous alignments are reported. These signals are debugging clues, not independent adjudication of unresolved answers or proof that a scientific label is correct. Passed semantic equivalents are not relabeled as failures. `--all` lists one short line for every nonpassing case; `--examples 0` prints only the aggregate report. No model, CUDA, weight download or saved-result write is involved. Tests: `./cluster python -m unittest test_inspect_qwen_failures`.
-
-For the reported **one missing contract, four unresolved answers and eight argument errors**:
-
-```sh
-./cluster git pull --ff-only && ./cluster python inspect_qwen_cases.py
-```
-
-This checks all 32 saved identities and receipts before inspecting the 13 selected cases. It prints their exact questions, saved calls, relevant history excerpts, and the compiler/executor's actual error messages. Dynamic argument schemas use the original conversation state. A missing exact source binding is distinguished from a schema violation; existing binding examples do not establish the intended answer. Each unresolved answer is compared with every frozen allowed program, separating delivered-text differences from dialogue-state differences. Reviews remain unresolved and original scores stay unchanged. This is CPU replay of saved calls, with no model, GPU, download, training or new DEV generation.
-
-The short output explicitly marks clipped context. `--full` prints complete selected histories and diagnostic JSON, including complete actual/expected states for unresolved cases. It only writes to the terminal. Run in the same private checkout and environment; no additional dependencies or assets are needed. Offline checks: `./cluster python -m unittest test_inspect_qwen_cases` and `./cluster node --test test_inspect_qwen_cases.mjs`.
-
-To copy the **three remaining disputed cases together** after discussing the first review:
-
-```sh
-./cluster git pull --ff-only && ./cluster python inspect_qwen_cases.py --remaining-reviews
-```
-
-This compact view excludes only the already displayed `control:history-v3-train-error_and_success-18-fresh_after_success-control` case. It does not resolve or remove any of the four saved review flags. Each remaining case shows its question, Qwen calls, the first frozen allowed program, and display/state/both match counts across **all** alternatives. The complete compact exchange map gives `[exchange ID, outcome, error, semantic turn ID, answer IDs, response-part kinds]` for every actual prior exchange, including failures and clarifications. Exchange numbers are never substituted for semantic turn IDs; zero answer objects alone do not establish that no scientific text was displayed. Reply excerpts surround the first mismatch against alternative zero; state paths are explicitly sampled. Long text fields are marked as clipped; complete evidence remains available with `--full`. Original numbering is retained. Authentication and CPU replay are unchanged, and no model is run.
 
 ## Finish the stopped current comparison
 
@@ -221,8 +189,6 @@ Local checks before publication cover recovered contexts, equivalent programs, c
 | `finish_history.py` | Finish the existing seed-1729 pair without an elapsed-time cutoff, preserving its original protocol and records. |
 | `inspect_reference.py` | Read a completed reference-admission report and display verified counts and short failed-response examples. |
 | `qualify_reference.py`, `qwen_transport.py` | Recheck only the same 32 TRAIN cases using Qwen Hermes output and the existing weights. |
-| `inspect_qwen_failures.py` | Explain saved qualification failures and call/argument differences without model inference. |
-| `inspect_qwen_cases.py`, `inspect_qwen_cases.mjs` | Trace the 13 selected saved failures, exact schema/binding errors and unresolved answer/state differences. |
 | `reference_model.py` | Pinned local Qwen download, transport adapter and bounded-memory inference. |
 | `assets/diagnostic-train-contexts.*` | Exact restored TRAIN histories and their provenance; no new training examples. |
 
