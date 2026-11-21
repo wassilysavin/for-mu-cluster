@@ -1,11 +1,13 @@
 """CPU controls for admission, model identity, recovery and planned denominators."""
 
 import json
+import stat
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import struct
 from tempfile import TemporaryDirectory
+from threading import Barrier
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -350,25 +352,44 @@ class DiagnosticControls(unittest.TestCase):
             self.assertLess(after['charged_bytes'] - before['charged_bytes'], 4096)
 
     def test_disk_cap_is_shared_by_concurrent_writers_and_rejects_before_append(self):
-        output = self.runs / 'diagnostic'; output.mkdir()
-        with patch.object(d.reference_model, 'CACHE_ROOTS', ('.runtime/reference',), create=True), \
-                patch.object(d, 'DISK_LIMIT', 180000), patch.object(d, 'RESERVE', 0), \
-                patch.object(d, 'AUXILIARY_ALLOWANCE', 0):
-            budget = d.DiskBudget(output, create=True)
-            def write(index):
-                path = output / f'worker-{index}.jsonl'
+        for block in (4096, 65536, 1048576):
+            with self.subTest(block=block):
+                self.check_concurrent_disk_cap(block)
+
+    def check_concurrent_disk_cap(self, block):
+        output = self.runs / f'diagnostic-{block}'
+        output.mkdir()
+        ready = Barrier(4)
+
+        def allocation(path):
+            info = path.lstat()
+            blocks = 1 if stat.S_ISDIR(info.st_mode) else (info.st_size + block - 1) // block
+            return {'device': info.st_dev, 'inode': info.st_ino, 'bytes': blocks * block}
+
+        def write(index):
+            path = output / f'worker-{index}.jsonl'
+            with path.open('ab') as stream:
+                ready.wait(timeout=30)
                 try:
-                    with path.open('ab') as stream:
-                        d.append_observation(stream, {'case_id': str(index), 'raw': 'x' * 60000})
-                except RuntimeError:
+                    d.append_observation(stream, {'case_id': str(index), 'raw': 'x' * block})
+                except RuntimeError as error:
+                    self.assertIn('would exceed its 3 GB disk budget', str(error))
                     self.assertEqual(path.stat().st_size, 0)
                     return False
-                return True
+            self.assertEqual(json.loads(path.read_bytes())['case_id'], str(index))
+            return True
+
+        # Two blocks for directory and receipt, two per record, two reserved for each write.
+        with (patch.object(d, 'allocation', allocation),
+              patch.object(d.os, 'statvfs', return_value=SimpleNamespace(f_frsize=block)),
+              patch.object(d, 'disk_usage', return_value=SimpleNamespace(free=10**9)),
+              patch.object(d, 'DISK_LIMIT', 8 * block), patch.object(d, 'RESERVE', 0),
+              patch.object(d, 'AUXILIARY_ALLOWANCE', 0)):
+            budget = d.DiskBudget(output, create=True)
             with patch.object(d, 'ACTIVE_BUDGET', budget), ThreadPoolExecutor(max_workers=4) as pool:
                 outcomes = list(pool.map(write, range(4)))
-            self.assertTrue(any(outcomes))
-            self.assertFalse(all(outcomes))
-            self.assertLessEqual(budget.usage()['charged_bytes'], d.DISK_LIMIT)
+            self.assertEqual(outcomes.count(True), 2)
+            self.assertEqual(budget.usage()['charged_bytes'], 6 * block)
 
     def test_disk_inventory_rejects_external_symlink(self):
         runtime = self.root / '.runtime'; runtime.mkdir()
