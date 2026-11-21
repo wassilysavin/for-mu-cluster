@@ -13,8 +13,8 @@ DATA = base.ASSETS / "week-train-v2.jsonl"
 PARENT_SHA = "5187779fc940c9ff19adaa90fee2233b9ea5815a5acb74420b0f012af12ae50e"
 CONTROL_SIZE = 5169
 FORMAT = "gemprf-week-train-expanded-v2"
-AUTHORS = {"history_followup": "extended_histories.mjs", "scientific_conditions": "extended_conditions.mjs",
-           "scope_change": "extended_scope.mjs"}
+AUTHORS = {"history_followup": "data_tools/extended_histories.py", "scientific_conditions": "data_tools/extended_conditions.py",
+           "scope_change": "data_tools/extended_scope.py"}
 SOURCE_FILES = (*base.SOURCES, "extended_train.py", *AUTHORS.values())
 
 
@@ -205,7 +205,7 @@ def build(path=DATA):
         try:
             os.link(temp, path)
         except FileExistsError:
-            base.ensure(not path.is_symlink() and base.digest(temp) == base.digest(path),
+            base.ensure(base.same_corpus(path, temp, "0d0c5e28ef54f598b3f72ebd09de6dd79a0f299d46b09a5d726536fa582cd198"),
                         "Existing corpus differs; publish a separate revision")
         return footer
     finally:

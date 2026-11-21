@@ -3,7 +3,6 @@
 from functools import lru_cache
 import json
 from pathlib import Path
-import subprocess
 
 
 ROOT = Path(__file__).resolve().parent
@@ -14,9 +13,8 @@ MODEL_TURN = "<end_of_turn>\n<start_of_turn>model\n"
 
 @lru_cache(maxsize=64)
 def upgrade_packed(text):
-    result = subprocess.run(["node", str(ROOT / "transfer_contract.mjs"), "--upgrade-packed"],
-                            input=text, capture_output=True, text=True, check=True, cwd=ROOT)
-    packed = result.stdout.rstrip("\n")
+    from data_tools.transfer_contract import upgradePacked
+    packed = upgradePacked(json.loads(text), json.loads((ROOT / "assets/registry.json").read_bytes()))
     parsed = json.loads(packed)
     if parsed.get("format") != "gemprf-shared-tool-contract" or parsed.get("version") != 1:
         raise ValueError("Transfer registry returned an unexpected prompt contract")

@@ -1,5 +1,7 @@
 """Compare two matched TRAIN schedules on fresh dialogue families and frozen regressions."""
 
+from private_runtime import python_tool
+
 from collections import Counter
 from contextlib import ExitStack, contextmanager
 from copy import copy
@@ -17,10 +19,11 @@ import diagnose
 import history
 import ledger
 import run
-import student_evidence
+from diagnostics import student_evidence
 from private_runtime import private_directory
-from transfer_decision import BOOTSTRAP_REPEATS, MINIMUM_GAIN, SEEDS, compare_pair
-from transfer_split import check_separation
+from source_provenance import runtime_sources, verify_sources
+from training.transfer_decision import BOOTSTRAP_REPEATS, MINIMUM_GAIN, SEEDS, compare_pair
+from data_tools.transfer_split import check_separation
 
 
 ROOT = Path(__file__).resolve().parent
@@ -64,7 +67,9 @@ class Space:
     def available(self):
         existing = self.previous.usage()["charged_bytes"]
         distinct = {}
-        tracked = [*ROOT.glob("transfer*"), *ROOT.glob("test_transfer*"), *(ROOT / "assets").glob("transfer*")]
+        patterns = ("transfer*", "tests/test_transfer*.py", "assets/transfer*", "data_tools/*.py", "eval_tools/*.py",
+                    "evaluation/*.py", "training/*.py", "diagnostics/*.py")
+        tracked = [p for pattern in patterns for p in ROOT.glob(pattern) if p.is_file()]
         # Allow a second full copy of the published inputs for Git/LFS object storage.
         git_allowance = sum(path.stat().st_size for path in tracked if path.is_file())
         paths = [p for p in RUNS.glob(f"{NAME}*") if p != self.previous.output]
@@ -98,8 +103,7 @@ def source(assets):
     checkpoint = student_evidence.verify(ROOT, ROOT / parent["path"], parent)
     identity = history.read(base / "identities.json")["treatment-1729"]
     core = student_evidence.inventory(identity["code"]["files"])
-    for name in ("model.py", "run.py"):
-        student_evidence.from_inventory(ROOT, ROOT / name, core)
+    verify_sources(ROOT, dict(identity["code"], files=[core[name] for name in ("model.py", "run.py")]))
     completion = history.read(base / "completion-v1/experiment.json")
     inherited = student_evidence.inventory(completion["source_snapshot"]["immutable"])
     parity_path = student_evidence.from_inventory(ROOT, base / "parity/parity.json", inherited)
@@ -127,11 +131,12 @@ def check_header(checkpoint, expected_step, lineage):
 
 def bindings():
     files = {"run.py", "model.py", "history.py", "ledger.py", "diagnose.py", "finish_history.py",
-             "student_evidence.py", "private_runtime.py", "cluster", "requirements.txt", "reference_model.py",
-             "transfer_contract.py", "transfer_contract.mjs", "transfer_split.py", "transfer_decision.py",
-             "diagnose-data.mjs", "diagnose-dev.mjs", "evaluate-known.mjs", "experiments.json",
+             "diagnostics/student_evidence.py", "private_runtime.py", "cluster", "requirements.txt", "reference_model.py",
+             "transfer_contract.py", "data_tools/transfer_contract.py", "data_tools/transfer_split.py", "training/transfer_decision.py",
+             "eval_tools/diagnose_data.py", "eval_tools/diagnose_dev.py", "eval_tools/evaluate_known.py", "experiments.json",
              "experiments-history.json", "assets/history-known-review.json"}
-    for pattern in ("evaluation/**/*.mjs", "transfer*.py", "transfer*.mjs", "assets/transfer*"):
+    files.update(runtime_sources(ROOT))
+    for pattern in ("transfer*.py", "assets/transfer*"):
         files.update(p.relative_to(ROOT).as_posix() for p in ROOT.glob(pattern) if p.is_file())
     return ledger.code_record(ROOT, sorted(files))
 
@@ -269,7 +274,7 @@ os.execvp(sys.argv[3], sys.argv[3:])
 
 
 def legacy_panel(directory, assets, generate, binding, space):
-    prefix = ["node", ROOT / "diagnose-dev.mjs", assets["registry"][0], assets["history_dev"][0]]
+    prefix = [*python_tool("eval_tools/diagnose_dev.py"), assets["registry"][0], assets["history_dev"][0]]
     shards = []
     for shard in range(4):
         path = directory / f"history-{shard}.jsonl"
@@ -338,12 +343,12 @@ def evaluate(directory, name, checkpoint, step, assets, config, manifest, fresh_
                     score, paths = legacy_panel(output, assets, generate, binding, space)
                 else:
                     fresh = key == "fresh"
-                    evaluator = "transfer_dev.mjs" if fresh else "evaluate-known.mjs"
+                    evaluator = "data_tools/transfer_dev.py" if fresh else "eval_tools/evaluate_known.py"
                     data = DEV if fresh else assets["regression_dev"][0]
                     spec = ({"bundle_sha256": fresh_spec["bundle_sha256"], "diagnostic_worker_sha256": binding}
                             if fresh else config["regression"])
                     path = output / f"{key}.jsonl"
-                    score = pump(["node", ROOT / evaluator, assets["registry"][0], data, path,
+                    score = pump([*python_tool(evaluator), assets["registry"][0], data, path,
                                   history.canonical(spec), diagnose.RESERVE], path, generate, binding, space)
                     rows = history.read_observations(path)
                     paths = [path]
@@ -378,7 +383,7 @@ def evaluate(directory, name, checkpoint, step, assets, config, manifest, fresh_
 def check():
     import transfer_train
     training = transfer_train.check()
-    spec = command_json(["node", ROOT / "transfer_dev.mjs", ROOT / "assets/registry.json", DEV, "--check"])
+    spec = command_json([*python_tool("data_tools/transfer_dev.py"), ROOT / "assets/registry.json", DEV, "--check"])
     if spec.get("kind") != "check" or not spec.get("cases"):
         raise ValueError("Invalid fresh DEV preflight")
     return {"train": training, "dev": spec, "separation": check_separation()}
@@ -387,6 +392,11 @@ def check():
 def execute():
     import transfer_train
     with ledger.execution_lease(RUNS) as lease:
+        if (RUNS / NAME / "result.json").is_file():
+            from diagnostics.saved_transfer import load_saved_transfer
+            _, result, _, _ = load_saved_transfer(ROOT)
+            print(f"{NAME}: {result['status']}; completed report {RUNS / NAME / 'result.json'}", flush=True)
+            return result
         preflight = check()
         description, fresh_spec = preflight["train"], preflight["dev"]
         config, original, assets = history.load(run)

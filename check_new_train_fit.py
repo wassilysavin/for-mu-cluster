@@ -1,21 +1,23 @@
 """Measure what each completed semantic-transfer checkpoint learned on its own TRAIN."""
+
+from source_provenance import runtime_sources
 import argparse
 from array import array
 from collections import Counter
 from hashlib import sha256
 import json
 
-from diagnose import NodeRPC
+from diagnose import EvaluatorRPC
 from ledger import execution_lease, file_record, publish_json
-from new_fit_inputs import iter_cases, load_inputs
-from new_fit_workers import FitBudget, LIMIT, OUTPUT, ROOT, RUNS, generate_arm
+from diagnostics.new_fit_inputs import iter_cases, load_inputs
+from diagnostics.new_fit_workers import FitBudget, LIMIT, OUTPUT, ROOT, RUNS, generate_arm
 from private_runtime import private_directory
-from student_evidence import digest, read
+from diagnostics.student_evidence import digest, read
 
 READER_FILES = (
-    "check_new_train_fit.py", "new_fit_inputs.py", "new_fit_workers.py", "new_train_fit.mjs",
-    "saved_transfer.py", "student_evidence.py", "transfer_train.py", "transfer_contract.mjs",
-    "transfer_train.mjs", "diagnose-data.mjs", "history-data.mjs", "evaluate-actual.mjs",
+    "check_new_train_fit.py", "diagnostics/new_fit_inputs.py", "diagnostics/new_fit_workers.py", "eval_tools/new_train_fit.py",
+    "diagnostics/saved_transfer.py", "diagnostics/student_evidence.py", "transfer_train.py", "data_tools/transfer_contract.py",
+    "data_tools/transfer_train.py", "eval_tools/diagnose_data.py", "data_tools/history_data.py", "eval_tools/evaluate_actual.py",
     "diagnose.py", "run.py", "model.py", "ledger.py", "history.py", "private_runtime.py",
 )
 
@@ -177,7 +179,7 @@ def main():
         if not OUTPUT.exists():
             budget.require(8192)
         private_directory(ROOT, OUTPUT.relative_to(ROOT))
-        files = [ROOT / n for n in READER_FILES] + sorted((ROOT / "evaluation").glob("*.mjs"))
+        files = [ROOT / n for n in sorted({*READER_FILES, "source_provenance.py", *runtime_sources(ROOT)})]
         manifest = {"protocol": "new-train-fit-v1", "inputs_sha256": digest(inputs),
                     "source_result_sha256": inputs["source_result_sha256"], "train": inputs["train"],
                     "provenance": inputs["train_provenance"],
@@ -190,7 +192,7 @@ def main():
         decoder = Tokenizer.from_file(str(ROOT / inputs["tokenizer"]["path"]))
         decoder.no_padding()
         decoder.no_truncation()
-        with NodeRPC("new_train_fit.mjs", ROOT / inputs["registry"]["path"]) as rpc:
+        with EvaluatorRPC("eval_tools/new_train_fit.py", ROOT / inputs["registry"]["path"]) as rpc:
             rpc.request({"action": "init", "receipts": str(ROOT / inputs["prefix_receipts"]["path"]),
                          "contexts": str(ROOT / inputs["contexts"]["path"])}, "initialized")
             prepared = prepare(inputs, decoder, rpc)

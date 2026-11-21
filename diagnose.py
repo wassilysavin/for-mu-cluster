@@ -1,5 +1,9 @@
 """Measure frozen TRAIN fit and a pinned reference after the history experiment."""
 
+from source_provenance import runtime_sources, verify_sources
+
+from private_runtime import python_tool
+
 from private_runtime import configure_private_runtime, private_directory
 
 configure_private_runtime()
@@ -36,9 +40,9 @@ SEED = 1729
 SHARDS = 4
 PILOT_CASES = 32
 PILOT_TRANSPORT_MINIMUM = 30
-BASE_CODE = ['model.py', 'ledger.py', 'private_runtime.py', 'cluster', 'history.py', 'history_prepare.py',
+BASE_CODE = ['model.py', 'ledger.py', 'private_runtime.py', 'cluster', 'history.py', 'training/history_prepare.py',
              'run.py', 'requirements.txt', 'experiments.json', 'experiments-history.json']
-NEW_CODE = ['diagnose.py', 'diagnose-data.mjs', 'diagnose-dev.mjs', 'reference_model.py', 'finish_history.py']
+NEW_CODE = ['diagnose.py', 'eval_tools/diagnose_data.py', 'eval_tools/diagnose_dev.py', 'reference_model.py', 'finish_history.py']
 
 
 def read(path):
@@ -221,7 +225,8 @@ def source_context(runs, source_id):
     pairs = [pair for pair in result.get('pairs', []) if pair.get('seed') == SEED]
     if len(pairs) != 1 or not result.get('baseline') or not all(pairs[0].get(arm) for arm in ('control', 'treatment')):
         raise RuntimeError('Need the completed baseline and both complete seed-1729 arms; a partial or budget-stopped pair is not silently substituted')
-    for entry in list(manifest['assets'].values()) + manifest['code']['files']:
+    verify_sources(ROOT, manifest['code'])
+    for entry in manifest['assets'].values():
         verify(entry)
     parity = read(source / 'stages/official-parity.json')
     if parity.get('identity_sha256') != binding or parity.get('result', {}).get('passed') is not True:
@@ -277,9 +282,9 @@ def source_context(runs, source_id):
             'train': train[0], 'students': selected, 'evidence': evidence}
 
 
-class NodeRPC:
+class EvaluatorRPC:
     def __init__(self, script, registry):
-        self.process = subprocess.Popen(['node', str(ROOT / script), str(registry)], stdin=subprocess.PIPE,
+        self.process = subprocess.Popen([*python_tool(script), str(registry)], stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, text=True, encoding='utf-8', bufsize=1)
 
     def __enter__(self):
@@ -350,10 +355,10 @@ def validate_contexts():
     return manifest, {row['case_id']: row for row in contexts}
 
 
-def panel_binding(source):
+def panel_binding(source, preparer=None):
     return history.digest({'train': record(source['train']), 'contexts': record(ROOT / 'assets/diagnostic-train-contexts.jsonl'),
                            'prepared': history.digest(source['prepared']),
-                           'preparer': record(ROOT / 'diagnose-data.mjs')})
+                           'preparer': preparer or record(ROOT / 'eval_tools/diagnose_data.py')})
 
 
 def prepare_panel(source, output, registry):
@@ -369,7 +374,7 @@ def prepare_panel(source, output, registry):
     tokenizer = Tokenizer.from_file(str(ROOT / source['manifest']['assets']['tokenizer']['path']))
     tokenizer.no_padding(); tokenizer.no_truncation()
     cases = []
-    with NodeRPC('diagnose-data.mjs', registry) as rpc:
+    with EvaluatorRPC('eval_tools/diagnose_data.py', registry) as rpc:
         for row in rows(source['train']):
             case_id = row['case_id']
             prompt = tokenizer.decode(row['input_ids'][:row['prompt_tokens']], skip_special_tokens=False)
@@ -439,8 +444,8 @@ def panel_cases(info):
     return cases
 
 
-def validate_panel(info, source):
-    if (info.get('binding') != panel_binding(source) or info.get('source_train') != record(source['train'])
+def validate_panel(info, source, preparer=None):
+    if (info.get('binding') != panel_binding(source, preparer) or info.get('source_train') != record(source['train'])
             or info.get('tokenizer') != source['manifest']['assets']['tokenizer']):
         raise ValueError('Prepared diagnostic panel belongs to different TRAIN or preparation code')
     cases = panel_cases(info)
@@ -567,7 +572,7 @@ def dev_worker(manifest, path, gpu, generate, binding):
     path = history.contained(path, ROOT)
     recover_jsonl(path)
     assets = manifest['source']['assets']
-    command = ['node', str(ROOT / 'diagnose-dev.mjs'), str(ROOT / assets['registry']['path']),
+    command = [*python_tool('eval_tools/diagnose_dev.py'), str(ROOT / assets['registry']['path']),
                str(ROOT / assets['history_dev']['path']), str(path), str(gpu), str(SHARDS), str(RESERVE), binding,
                '--relay-persist']
     with path.open('ab') as observations, subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -642,7 +647,7 @@ def worker(args):
     ready = target / f'ready-{args.gpu}.json'
     publish_snapshot(ready, {'pid': os.getpid(), 'gpu': args.gpu, 'attempt': args.attempt})
     registry = ROOT / manifest['source']['assets']['registry']['path']
-    with NodeRPC('diagnose-data.mjs', registry) as rpc:
+    with EvaluatorRPC('eval_tools/diagnose_data.py', registry) as rpc:
         train_worker(rpc, cases, target / f'train-{args.gpu}.jsonl', generate, f'{args.worker} GPU {args.gpu}', binding)
     if args.worker == 'reference' and args.phase == 'measure':
         dev_worker(manifest, target / f'dev-{args.gpu}.jsonl', args.gpu, generate, binding)
@@ -755,10 +760,10 @@ def qualify(output, manifest):
             'claim': 'transport admission only; measured semantic competence is not established by this gate', **result}
 
 
-def collect_dev(output, manifest):
+def collect_dev(output, manifest, *, read_only=False):
     assets = manifest['source']['assets']
     registry, bundle = (ROOT / assets[key]['path'] for key in ('registry', 'history_dev'))
-    base_command = ['node', str(ROOT / 'diagnose-dev.mjs'), str(registry), str(bundle)]
+    base_command = [*python_tool('eval_tools/diagnose_dev.py'), str(registry), str(bundle)]
     plan = json.loads(subprocess.check_output(base_command + ['--plan'], text=True))
     target = output / 'reference/measure'
     observed = merged_rows([target / f'dev-{gpu}.jsonl' for gpu in range(SHARDS)],
@@ -770,6 +775,8 @@ def collect_dev(output, manifest):
     expected = ''.join(canonical(row) + '\n' for row in observed)
     if destination.exists():
         if destination.read_text() != expected: raise ValueError('Merged DEV changed')
+    elif read_only:
+        raise ValueError('Completed diagnostic is missing its merged reference DEV')
     else:
         with guarded_write(destination, len(expected.encode())), TemporaryDirectory(dir=target) as temporary:
             staged = Path(temporary) / 'dev.jsonl'
@@ -818,7 +825,7 @@ def check_inputs():
     return context
 
 
-def validate_manifest(manifest, identity, source, output):
+def validate_manifest(manifest, identity, source, output, *, frozen_preparer=None):
     if (manifest.get('identity_sha256') != history.digest(identity)
             or manifest.get('students') != source['students']
             or manifest.get('source') != {'assets': source['manifest']['assets'], 'config': source['manifest']['config']}
@@ -827,9 +834,20 @@ def validate_manifest(manifest, identity, source, output):
             or manifest.get('no_training_performed') is not True
             or manifest.get('sealed_test_accessed') is not False):
         raise ValueError('Diagnostic manifest changed or belongs to another completed experiment')
-    validate_panel(manifest['train_panel'], source)
+    binding = {'sha256': history.digest(manifest)}
+    if frozen_preparer is not None and read(output / 'manifest-binding.json') != binding:
+        raise ValueError('Completed diagnostic manifest binding differs')
+    validate_panel(manifest['train_panel'], source, frozen_preparer)
     reference_model.validate_receipt(manifest['reference'])
-    immutable(output / 'manifest-binding.json', {'sha256': history.digest(manifest)})
+    if frozen_preparer is None:
+        immutable(output / 'manifest-binding.json', binding)
+
+
+def diagnostic_policy():
+    return {'seed': SEED, 'gpus': SHARDS, 'student_generation_cap': 512,
+            'reference_generation_cap': 2048, 'qualification_cases': PILOT_CASES,
+            'transport_minimum': PILOT_TRANSPORT_MINIMUM,
+            'model': reference_model.MODEL_ID, 'revision': reference_model.REVISION}
 
 
 def compare(args):
@@ -837,10 +855,17 @@ def compare(args):
     import run as runner
     if not SAFE_ID.fullmatch(args.run_id) or len(args.run_id) > 70:
         raise ValueError('Invalid diagnostic run ID')
+    runs = history.contained(ROOT / 'runs', ROOT)
+    output = history.contained(runs / args.run_id, runs)
+    if (output / 'result.json').exists():
+        check_inputs()
+        return completed_report(output, source_context(runs, args.source_run_id))
     runs = directory('runs')
     check_inputs()
     with execution_lease(runs) as lease:
         source = source_context(runs, args.source_run_id)
+        if (output / 'result.json').exists():
+            return completed_report(output, source)
         output = directory(f'runs/{args.run_id}')
         hardware = runner.four_gpu_identity()
         if version('transformers') != '4.57.3' or version('huggingface-hub') != '0.36.2':
@@ -848,15 +873,12 @@ def compare(args):
         reference_model.require_reference_dependencies()
         ACTIVE_BUDGET = DiskBudget(output, create=True)
         os.environ['CUDA_CACHE_DISABLE'] = '1'
-        code_paths = BASE_CODE + NEW_CODE + [str(p.relative_to(ROOT)) for p in sorted((ROOT / 'evaluation').glob('*.mjs'))]
+        code_paths = BASE_CODE + NEW_CODE + runtime_sources(ROOT)
         identity = {'source_evidence': source['evidence'], 'code': code_record(ROOT, sorted(set(code_paths))),
                     'hardware': hardware, 'dependencies': {name: version(name) for name in ('transformers', 'huggingface-hub', *reference_model.REFERENCE_DEPENDENCIES)},
                     'disk_budget': record(output / 'disk-budget.json'),
                     'contexts': [record(ROOT / 'assets' / name) for name in ('diagnostic-train-contexts.jsonl', 'diagnostic-train-contexts.json')],
-                    'policy': {'seed': SEED, 'gpus': SHARDS, 'student_generation_cap': 512,
-                               'reference_generation_cap': 2048, 'qualification_cases': PILOT_CASES,
-                               'transport_minimum': PILOT_TRANSPORT_MINIMUM,
-                               'model': reference_model.MODEL_ID, 'revision': reference_model.REVISION}}
+                    'policy': diagnostic_policy()}
         immutable(output / 'identity.json', identity)
         if (output / 'experiment.json').exists():
             manifest = read(output / 'experiment.json')
@@ -886,67 +908,118 @@ def compare(args):
                         'comparison_type': 'qualified reference recipe, not an architecture-only causal comparison or model ceiling'}
             publish_json(output / 'experiment.json', manifest)
             immutable(output / 'manifest-binding.json', {'sha256': history.digest(manifest)})
-        final = output / 'result.json'
-        if final.exists():
-            result = read(final)
-            if result.get('identity_sha256') != manifest['identity_sha256']:
-                raise ValueError('Final diagnostic identity changed')
-            for entry in result['artifacts']: verify(entry)
-        stages = directory(f'runs/{args.run_id}/stages')
-        qualification = stages / 'reference-transport.json'
-        if qualification.exists():
-            admitted = read(qualification)
-            for entry in admitted['observations']: verify(entry)
-            if admitted != qualify(output, manifest):
-                raise ValueError('Saved reference transport decision differs from its observations')
+        return measure_or_report(output, identity, manifest, lease)
+
+
+def completed_report(output, source):
+    identity = read(output / 'identity.json')
+    manifest = read(output / 'experiment.json')
+    code = identity['code']
+    entries = {entry['path']: entry for entry in code['files']}
+    legacy = 'diagnose-data.mjs' in entries
+    if legacy:
+        base = ['model.py', 'ledger.py', 'private_runtime.py', 'cluster', 'history.py', 'history_prepare.py',
+                'run.py', 'requirements.txt', 'experiments.json', 'experiments-history.json']
+        drivers = ['diagnose.py', 'diagnose-data.mjs', 'diagnose-dev.mjs', 'reference_model.py', 'finish_history.py']
+        modules = ('actual-history', 'development-evaluator', 'dialogue', 'evaluation', 'functiongemma',
+                   'history-control', 'history-train', 'known-review', 'model-input', 'model-result',
+                   'model-tools', 'prompt', 'registry', 'schema', 'session')
+        expected = set(base + drivers + [f'evaluation/{name}.mjs' for name in modules])
+    else:
+        expected = set(BASE_CODE + NEW_CODE + runtime_sources(ROOT))
+    if set(entries) != expected or len(entries) != len(code['files']):
+        raise ValueError('Completed diagnostic source inventory differs')
+    verify_sources(ROOT, code)
+    evidence = {entry['path']: entry for entry in source['evidence']}
+    if legacy and source['result'].get('completion_policy') == completion.POLICY:
+        parent_code = source['manifest']['code']
+        verify_sources(ROOT, parent_code)
+        evidence.update({entry['path']: entry for entry in parent_code['files']})
+    saved = identity['source_evidence']
+    if len(saved) != len(evidence) or {entry['path']: entry for entry in saved} != evidence:
+        raise ValueError('Completed diagnostic source evidence differs from its authenticated history')
+    contexts = [record(ROOT / 'assets' / name) for name in ('diagnostic-train-contexts.jsonl', 'diagnostic-train-contexts.json')]
+    dependencies = {'transformers': '4.57.3', 'huggingface-hub': '0.36.2', **reference_model.REFERENCE_DEPENDENCIES}
+    if (identity['disk_budget'] != record(output / 'disk-budget.json') or identity['contexts'] != contexts
+            or identity['policy'] != diagnostic_policy() or identity['dependencies'] != dependencies
+            or [gpu['index'] for gpu in identity['hardware']['devices']] != list(range(SHARDS))):
+        raise ValueError('Completed diagnostic identity differs from its recorded protocol')
+    DiskBudget(output)
+    preparer = entries['diagnose-data.mjs' if legacy else 'eval_tools/diagnose_data.py']
+    validate_manifest(manifest, identity, source, output, frozen_preparer=preparer)
+    return measure_or_report(output, identity, manifest, lease=None)
+
+
+def measure_or_report(output, identity, manifest, lease):
+    final = output / 'result.json'
+    if final.exists():
+        result = read(final)
+        if result.get('identity_sha256') != manifest['identity_sha256']:
+            raise ValueError('Final diagnostic identity changed')
+        for entry in result['artifacts']: verify(entry)
+    frozen = lease is None
+    if frozen and not final.is_file():
+        raise ValueError('Missing terminal diagnostic report')
+    stages = output / 'stages' if frozen else directory((output / 'stages').relative_to(ROOT))
+    qualification = stages / 'reference-transport.json'
+    if qualification.exists():
+        admitted = read(qualification)
+        for entry in admitted['observations']: verify(entry)
+        if admitted != qualify(output, manifest):
+            raise ValueError('Saved reference transport decision differs from its observations')
+    else:
+        if frozen:
+            raise ValueError('Completed diagnostic is missing its transport stage')
+        print('Reference transport admission: 32 TRAIN-only cases on four GPUs.', flush=True)
+        launch(output, 'reference', 'qualification', lease)
+        admitted = qualify(output, manifest)
+        publish_json(qualification, admitted)
+    if not frozen and not admitted['passed']:
+        print(f'Reference transport admission failed: {qualification}. Student TRAIN fit will still run; reference DEV is withheld.', flush=True)
+    measured = {}
+    for name in [*manifest['students'], *(['reference'] if admitted['passed'] else [])]:
+        completed = stages / f'{name}.json'
+        if completed.exists():
+            value = read(completed)
+            for entry in value['train']['observations']: verify(entry)
+            if name == 'reference': verify(value['dev']['observations'])
+            train = collect_train(output, manifest, name, 'measure')
+            dev = collect_dev(output, manifest, read_only=frozen)[0] if name == 'reference' else manifest['students'][name]
+            expected = {'identity_sha256': manifest['identity_sha256'], 'model': name, 'train': train,
+                        'dev': dev, 'dev_reused_from_authenticated_source': name != 'reference'}
+            if value != expected:
+                raise ValueError('Saved model summary differs from its frozen inputs and observations')
         else:
-            print('Reference transport admission: 32 TRAIN-only cases on four GPUs.', flush=True)
-            launch(output, 'reference', 'qualification', lease)
-            admitted = qualify(output, manifest)
-            publish_json(qualification, admitted)
-        if not admitted['passed']:
-            print(f'Reference transport admission failed: {qualification}. Student TRAIN fit will still run; reference DEV is withheld.', flush=True)
-        measured = {}
-        for name in [*manifest['students'], *(['reference'] if admitted['passed'] else [])]:
-            completed = stages / f'{name}.json'
-            if completed.exists():
-                value = read(completed)
-                for entry in value['train']['observations']: verify(entry)
-                if name == 'reference': verify(value['dev']['observations'])
-                train = collect_train(output, manifest, name, 'measure')
-                dev = collect_dev(output, manifest)[0] if name == 'reference' else manifest['students'][name]
-                expected = {'identity_sha256': manifest['identity_sha256'], 'model': name, 'train': train,
-                            'dev': dev, 'dev_reused_from_authenticated_source': name != 'reference'}
-                if value != expected:
-                    raise ValueError('Saved model summary differs from its frozen inputs and observations')
-            else:
-                print(f'Measuring {name}: complete frozen TRAIN union on four GPUs.', flush=True)
-                launch(output, name, 'measure', lease)
-                train = collect_train(output, manifest, name, 'measure')
-                dev = collect_dev(output, manifest)[0] if name == 'reference' else manifest['students'][name]
-                value = {'identity_sha256': manifest['identity_sha256'], 'model': name,
-                         'train': train, 'dev': dev, 'dev_reused_from_authenticated_source': name != 'reference'}
-                publish_json(completed, value)
-            measured[name] = value
-        reference_rows = list(rows(verify(measured['reference']['dev']['observations']))) if 'reference' in measured else []
-        paired = {name: paired_cells(list(rows(verify(value['dev']['observations']))), reference_rows)
-                  for name, value in measured.items() if name != 'reference' and admitted['passed']}
-        artifacts = [record(stages / f'{name}.json') for name in measured] + [record(qualification)]
-        artifacts += [record(output / name) for name in ('experiment.json', 'manifest-binding.json', 'disk-budget.json', 'train-panel.json', 'train-panel.jsonl')]
-        for value in measured.values():
-            artifacts += value['train']['observations'] + [value['dev']['observations']]
+            if frozen:
+                raise ValueError(f'Completed diagnostic is missing its {name} stage')
+            print(f'Measuring {name}: complete frozen TRAIN union on four GPUs.', flush=True)
+            launch(output, name, 'measure', lease)
+            train = collect_train(output, manifest, name, 'measure')
+            dev = collect_dev(output, manifest, read_only=frozen)[0] if name == 'reference' else manifest['students'][name]
+            value = {'identity_sha256': manifest['identity_sha256'], 'model': name,
+                     'train': train, 'dev': dev, 'dev_reused_from_authenticated_source': name != 'reference'}
+            publish_json(completed, value)
+        measured[name] = value
+    reference_rows = list(rows(verify(measured['reference']['dev']['observations']))) if 'reference' in measured else []
+    paired = {name: paired_cells(list(rows(verify(value['dev']['observations']))), reference_rows)
+              for name, value in measured.items() if name != 'reference' and admitted['passed']}
+    artifacts = [record(stages / f'{name}.json') for name in measured] + [record(qualification)]
+    artifacts += [record(output / name) for name in ('experiment.json', 'manifest-binding.json', 'disk-budget.json', 'train-panel.json', 'train-panel.jsonl')]
+    for value in measured.values():
+        artifacts += value['train']['observations'] + [value['dev']['observations']]
+    if not frozen:
         for entry in identity['source_evidence']: verify(entry)
-        result = {'status': 'COMPLETE_DIAGNOSTIC' if admitted['passed'] else 'TRAIN_FIT_COMPLETE_REFERENCE_NOT_QUALIFIED',
-                  'identity_sha256': manifest['identity_sha256'],
-                  'reference_transport': admitted, 'models': measured, 'paired_supported_dev': paired,
-                  'artifacts': artifacts, 'release_ready': False,
-                  'interpretation': 'TRAIN fit measures consistency with frozen training labels, not independently established scientific truth. Own-history DEV uses each model actual outputs. Unresolved and critical cases cannot count as passes. Reference differences do not establish a model capacity ceiling.'}
-        if final.exists():
-            if read(final) != result: raise ValueError('Final report differs from recomputed diagnostic summaries')
-        else:
-            publish_json(final, result)
-        print_summary(result, final)
-        return result
+    result = {'status': 'COMPLETE_DIAGNOSTIC' if admitted['passed'] else 'TRAIN_FIT_COMPLETE_REFERENCE_NOT_QUALIFIED',
+              'identity_sha256': manifest['identity_sha256'],
+              'reference_transport': admitted, 'models': measured, 'paired_supported_dev': paired,
+              'artifacts': artifacts, 'release_ready': False,
+              'interpretation': 'TRAIN fit measures consistency with frozen training labels, not independently established scientific truth. Own-history DEV uses each model actual outputs. Unresolved and critical cases cannot count as passes. Reference differences do not establish a model capacity ceiling.'}
+    if frozen or final.exists():
+        if read(final) != result: raise ValueError('Final report differs from recomputed diagnostic summaries')
+    else:
+        publish_json(final, result)
+    print_summary(result, final)
+    return result
 
 
 def print_summary(result, path):

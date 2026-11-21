@@ -16,6 +16,8 @@ from tempfile import TemporaryDirectory
 from time import monotonic, time, time_ns
 from types import SimpleNamespace
 
+from private_runtime import python_tool
+from source_provenance import runtime_sources
 from ledger import SAFE_ID, code_record, execution_lease, file_record, publish_json, read_result
 
 ROOT = Path(__file__).resolve().parent
@@ -237,16 +239,16 @@ def load(runner):
 
 
 def check(runner):
-    import history_prepare
+    from training import history_prepare
     config, _, assets = load(runner)
     history_prepare.check(config, {key: value[0] for key, value in assets.items()})
-    subprocess.run(["node", str(ROOT / "evaluate-actual.mjs"), str(assets["registry"][0]),
+    subprocess.run([*python_tool("eval_tools/evaluate_actual.py"), str(assets["registry"][0]),
                     str(assets["history_dev"][0]), "--check", canonical(config["evaluation"])], check=True)
     print("Inputs validated. The history command will verify checkpoint 7205 and runtime parity before training.", flush=True)
 
 
 def validate_prepared(prepared, directory, runner):
-    from history_prepare import verify_collection
+    from training.history_prepare import verify_collection
     if prepared.get("complete") is not True or prepared.get("reviewed") is not True:
         raise ValueError("TRAIN collection and independent label review must be complete before freezing")
     declaration = prepared["train"]
@@ -272,11 +274,17 @@ def validate_prepared(prepared, directory, runner):
     return (path, file_record(path, relative_to=ROOT)), schedules
 
 
+def protocol_source_paths(config):
+    # The frozen protocol records paths in the published implementation.
+    current = {"history-data.mjs": "data_tools/history_data.py", "test_history.py": "tests/test_history.py"}
+    return [current.get(name, name) for name in config.get("code_files", [])]
+
+
 def make_identities(runner, original, config, assets, schedules, runtime, receipt, prepared):
-    paths = ["run.py", "history.py", "history_prepare.py", "history_parity.py", "model.py", "ledger.py", "private_runtime.py", "cluster",
-             "evaluate.mjs", "evaluate-actual.mjs", "evaluate-known.mjs", "requirements.txt", "experiments.json", "experiments-history.json"]
-    paths.extend(str(path.relative_to(ROOT)) for path in sorted((ROOT / "evaluation").rglob("*.mjs")))
-    paths.extend(config.get("code_files", []))
+    paths = ["run.py", "history.py", "training/history_prepare.py", "history_parity.py", "model.py", "ledger.py", "private_runtime.py", "cluster",
+             "eval_tools/evaluate.py", "eval_tools/evaluate_actual.py", "eval_tools/evaluate_known.py", "requirements.txt", "experiments.json", "experiments-history.json"]
+    paths.extend(runtime_sources(ROOT))
+    paths.extend(protocol_source_paths(config))
     code = code_record(ROOT, sorted(set(paths)))
     identities, experiments = {}, {}
     for name in ["pilot", "baseline"] + [f"{arm}-{seed}" for seed in SEEDS for arm in ("control", "treatment")]:
@@ -450,14 +458,14 @@ def append_timing(path, kind, seconds, *, case_id=None):
         os.fsync(stream.fileno())
 
 
-def evaluate_bridge(runtime, assets, panel, observations, spec, deadline, *, script="evaluate-actual.mjs", timings=None):
+def evaluate_bridge(runtime, assets, panel, observations, spec, deadline, *, script="eval_tools/evaluate_actual.py", timings=None):
     from tokenizers import Tokenizer
     tokenizer = Tokenizer.from_file(str(assets["tokenizer"][0]))
     tokenizer.no_padding()
     tokenizer.no_truncation()
     if tokenizer.decode([50], skip_special_tokens=False) != "<start_function_response>":
         raise ValueError("The tokenizer stop token changed")
-    command = ["node", str(ROOT / script), str(assets["registry"][0]), str(panel), str(observations),
+    command = [*python_tool(script), str(assets["registry"][0]), str(panel), str(observations),
                canonical(spec), str(RESERVE)]
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8") as process:
         score, generated, after_reply = None, 0, None
@@ -479,7 +487,7 @@ def evaluate_bridge(runtime, assets, panel, observations, spec, deadline, *, scr
                 began = monotonic()
                 tokens = tokenizer.encode(message["prompt"], add_special_tokens=False).ids
                 if not 0 < len(tokens) <= 32768 - 512:
-                    if script != "evaluate-actual.mjs":
+                    if script != "eval_tools/evaluate_actual.py":
                         raise ValueError("Known regression prompt overflow")
                     reply = {"raw_ids": [], "raw_text": "", "error": "context_overflow"}
                 else:
@@ -712,7 +720,7 @@ class ClusterBackend:
             score = evaluate_bridge(runtime, self.assets,
                 self.assets["regression_dev" if known else "history_dev"][0], observations,
                 self.config["regression" if known else "evaluation"], deadline,
-                script="evaluate-known.mjs" if known else "evaluate-actual.mjs", timings=timings)
+                script="eval_tools/evaluate_known.py" if known else "eval_tools/evaluate_actual.py", timings=timings)
         finally:
             runtime.close()
             del runtime
@@ -1277,14 +1285,14 @@ def reference_revision(args, runner, current, parity):
 
 def compare(args, runner):
     import history_parity
-    import history_prepare
+    from training import history_prepare
     if not SAFE_ID.fullmatch(args.run_id) or len(args.run_id) > 70:
         raise ValueError("History run ID must be a safe name of at most 70 characters")
     args.runs = contained(args.runs)
     config, original, assets = load(runner)
     hook_assets = {key: value[0] for key, value in assets.items()}
     history_prepare.check(config, hook_assets)
-    subprocess.run(["node", str(ROOT / "evaluate-actual.mjs"), str(assets["registry"][0]),
+    subprocess.run([*python_tool("eval_tools/evaluate_actual.py"), str(assets["registry"][0]),
                     str(assets["history_dev"][0]), "--check", canonical(config["evaluation"])], check=True)
     with execution_lease(args.runs):
         initial, receipt = source_checkpoint(args.runs, args.source_run_id, assets)
@@ -1296,10 +1304,10 @@ def compare(args, runner):
             if directory.exists() and any(directory.iterdir()) and not (directory / "experiment.json").is_file():
                 raise ValueError("The output directory already belongs to another run; it will not be changed")
             directory.mkdir(exist_ok=True)
-        code_paths = ["run.py", "history.py", "history_prepare.py", "history_parity.py", "model.py", "ledger.py", "private_runtime.py", "cluster", "experiments.json",
-                      "evaluate-actual.mjs", "evaluate-known.mjs", "evaluate.mjs", "experiments-history.json", "requirements.txt"]
-        code_paths.extend(str(path.relative_to(ROOT)) for path in sorted((ROOT / "evaluation").rglob("*.mjs")))
-        code_paths.extend(config.get("code_files", []))
+        code_paths = ["run.py", "history.py", "training/history_prepare.py", "history_parity.py", "model.py", "ledger.py", "private_runtime.py", "cluster", "experiments.json",
+                      "eval_tools/evaluate_actual.py", "eval_tools/evaluate_known.py", "eval_tools/evaluate.py", "experiments-history.json", "requirements.txt"]
+        code_paths.extend(runtime_sources(ROOT))
+        code_paths.extend(protocol_source_paths(config))
         manifest = {"config": config, "original": original, "assets": {key: value[1] for key, value in assets.items()}, "origin": receipt,
                     "runtime": hardware, "code": code_record(ROOT, sorted(set(code_paths))),
                     "reference_policy": history_parity.reference_policy_record(REFERENCE_POLICY)}

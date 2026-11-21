@@ -18,6 +18,7 @@ from time import monotonic, sleep
 
 import diagnose as diagnostic
 import inspect_reference as inspector
+from source_provenance import runtime_sources
 from ledger import code_record, execution_lease
 import qwen_transport as transport
 import reference_model as reference
@@ -69,10 +70,13 @@ def load_source():
         raise ValueError('This revision requires the original completed, unqualified reference diagnostic')
     required = set(diagnostic.BASE_CODE + diagnostic.NEW_CODE)
     original_code = identity['code']['files']
+    if any(item['path'].endswith('.mjs') for item in original_code):
+        required -= {'eval_tools/diagnose_data.py', 'eval_tools/diagnose_dev.py', 'training/history_prepare.py'}
+        required.update({'diagnose-data.mjs', 'diagnose-dev.mjs', 'history_prepare.py'})
     if not required.issubset({item['path'] for item in original_code}):
         raise ValueError('Original diagnostic code inventory is incomplete')
-    for entry in original_code:
-        diagnostic.verify(entry)
+    from source_provenance import verify_sources
+    verify_sources(ROOT, identity['code'])
     if manifest['train_panel'] != diagnostic.read(parent / 'train-panel.json'):
         raise ValueError('Original TRAIN panel metadata changed')
     diagnostic.verify(manifest['disk_budget'])
@@ -131,7 +135,7 @@ def select_cases(panel):
 
 
 def code_identity(source):
-    names = [entry['path'] for entry in source['identity']['code']['files']] + NEW_CODE
+    names = diagnostic.BASE_CODE + diagnostic.NEW_CODE + NEW_CODE + runtime_sources(ROOT)
     return code_record(ROOT, sorted(set(names)))
 
 
@@ -216,7 +220,10 @@ def verify_manifest(manifest, source, cases, *, allow_unbound=False):
         raise ValueError('Qualification manifest changed or belongs to another source')
     current = code_identity(source)
     if current['files'] != manifest['code']['files']:
-        raise ValueError('Qualification code changed; keep the frozen run intact')
+        if not (output_directory() / 'result.json').is_file():
+            raise ValueError('Qualification code changed; keep the frozen run intact')
+        from source_provenance import verify_sources
+        verify_sources(ROOT, manifest['code'])
     child = output_directory()
     if allow_unbound and not (child / 'manifest-binding.json').exists():
         if {path.name for path in child.iterdir()} == {'experiment.json'}:
@@ -233,7 +240,7 @@ def collect(child, manifest, source, cases):
         if [row['case_id'] for row in diagnostic.rows(path)] != planned:
             raise ValueError('Saved GPU shard differs from its original assignment')
     all_rows = diagnostic.merged_rows(paths, manifest['case_ids'])
-    with diagnostic.NodeRPC('diagnose-data.mjs', source['registry']) as rpc:
+    with diagnostic.EvaluatorRPC('eval_tools/diagnose_data.py', source['registry']) as rpc:
         for envelope, row in zip(cases, all_rows):
             item = envelope['case']
             if row['case_sha256'] != item['case_sha256']:
@@ -297,7 +304,7 @@ def worker(args):
     path = writable_file(child / f'gpu-{args.worker}.jsonl')
     saved = diagnostic.recover_jsonl(path)
     worker_binding = binding(manifest, args.worker)
-    with diagnostic.NodeRPC('diagnose-data.mjs', source['registry']) as rpc:
+    with diagnostic.EvaluatorRPC('eval_tools/diagnose_data.py', source['registry']) as rpc:
         if len(saved) > len(cases):
             raise ValueError('Saved qualification shard exceeds the plan')
         for item, row in zip(cases, saved):

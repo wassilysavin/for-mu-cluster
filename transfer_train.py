@@ -1,5 +1,9 @@
 """Verify and materialize matched semantic-transfer TRAIN schedules without inference."""
 
+from source_provenance import runtime_sources
+
+from private_runtime import python_tool
+
 from collections import Counter, defaultdict
 from hashlib import file_digest, sha256
 import json
@@ -167,7 +171,7 @@ def receipt_source():
 
 
 def native_rows(receipt_path):
-    args = ["node", str(ROOT / "transfer_train.mjs"), str(receipt_path) if receipt_path else "--fixture"]
+    args = [*python_tool("data_tools/transfer_train.py"), str(receipt_path) if receipt_path else "--fixture"]
     with subprocess.Popen(args, cwd=ROOT, stdout=subprocess.PIPE, text=True) as worker:
         try:
             for line in worker.stdout:
@@ -275,8 +279,8 @@ def prepare(directory, *, available_bytes=None):
     identity = check()
     source, old_digest = receipt_source()
     identity["observed_receipts_sha256"] = old_digest
-    core = ["transfer_train.py", "transfer_train.mjs", "transfer_contract.mjs", "transfer_contract.py"]
-    identity["code"] = {name: digest(ROOT / name) for name in core}
+    core = ["transfer_train.py", "data_tools/transfer_train.py", "data_tools/transfer_contract.py", "transfer_contract.py"]
+    identity["code"] = {name: digest(ROOT / name) for name in sorted({*core, *runtime_sources(ROOT)})}
     def verify(record, data):
         if (record["identity"] != identity or record["bytes"] != data.stat().st_size
                 or record["sha256"] != digest(data)):

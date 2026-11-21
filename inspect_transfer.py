@@ -4,7 +4,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 import sys
 
-from saved_transfer import load_saved_transfer
+from diagnostics.saved_transfer import load_saved_transfer
 
 ROOT = Path(__file__).resolve().parent
 PAIRS = (("contrast", "ordinary"), ("ordinary", "parent"), ("contrast", "parent"))

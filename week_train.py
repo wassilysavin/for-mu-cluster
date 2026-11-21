@@ -1,4 +1,6 @@
 """Build or inspect the standalone, prefix-shared GEM-pRF weekly TRAIN corpus."""
+
+from private_runtime import python_tool
 import argparse
 from collections import Counter
 from hashlib import sha256
@@ -8,19 +10,18 @@ from pathlib import Path
 import subprocess
 from tempfile import NamedTemporaryFile
 
+from private_runtime import python_tool
+from source_provenance import runtime_sources
 from transfer_contract import MODEL_TURN, USER_TURN, upgrade_replay
-from transfer_split import items, normalize, questions
+from data_tools.transfer_split import items, normalize, questions
 from transfer_train import FROZEN, ROOT, compact, digest, tokenized
-from week_replay import iter_replay, select_replay
+from data_tools.week_replay import iter_replay, select_replay
 
 ASSETS = ROOT / "assets"
 DATA = ASSETS / "week-train-v1.jsonl"
 FORMAT = "gemprf-week-train-v1"
 PUBLIC_DEV = ("dev700.jsonl", "dev-volume-v1.jsonl", "actual-history-v3-dev.json", "transfer-dev-v1.json")
-SOURCES = ("week_train.py", "week_replay.py", "week_replay_check.mjs", "week_dialogues.mjs", "week_compositions.mjs",
-           "transfer_train.py", "transfer_split.py", "transfer_contract.py", "transfer_contract.mjs",
-           "new_train_fit.mjs", "transfer_train.mjs", "diagnose-data.mjs",
-           *(p.relative_to(ROOT).as_posix() for p in sorted((ROOT / "evaluation").glob("*.mjs"))))
+SOURCES = ("week_train.py", "transfer_train.py", "transfer_contract.py", *runtime_sources(ROOT))
 STREAMS = ("replay", "dialogue", "composition")
 
 
@@ -62,7 +63,7 @@ def public_development():
 
 
 def rendered(script):
-    with subprocess.Popen(["node", str(ROOT / script), "--render"], cwd=ROOT, stdout=subprocess.PIPE) as proc:
+    with subprocess.Popen([*python_tool(script), "--render"], cwd=ROOT, stdout=subprocess.PIPE) as proc:
         try:
             for line in proc.stdout:
                 yield json.loads(line)
@@ -74,7 +75,7 @@ def rendered(script):
 
 
 def replay_rows(refs, tok):
-    with subprocess.Popen(["node", str(ROOT / "week_replay_check.mjs")], cwd=ROOT, stdin=subprocess.PIPE,
+    with subprocess.Popen([*python_tool("data_tools/week_replay_check.py")], cwd=ROOT, stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, text=True, encoding="utf-8") as proc:
         try:
             for ref, original in iter_replay(refs):
@@ -105,7 +106,7 @@ def replay_rows(refs, tok):
 def source_rows(refs, tok):
     for row, tokens in replay_rows(refs, tok):
         yield "replay", row, tokens
-    for stream, script in [("dialogue", "week_dialogues.mjs"), ("composition", "week_compositions.mjs")]:
+    for stream, script in [("dialogue", "data_tools/week_dialogues.py"), ("composition", "data_tools/week_compositions.py")]:
         for row in rendered(script):
             yield stream, row, tokenized(row, tok)
 
@@ -125,6 +126,41 @@ def pack(stream, row, tokens):
                 prompt_tokens=tokens["prompt_tokens"], target_tokens=len(tokens["input_ids"]) - tokens["prompt_tokens"],
                 tokens_sha256=text_hash(compact(tokens["input_ids"])))
     return case, pre, semantic_key, data
+
+
+def same_corpus(published, rebuilt, original_sha):
+    """Compare every regenerated row while allowing new author source receipts."""
+    if published.is_symlink() or not published.is_file():
+        return False
+    checksum = digest(published)
+    if checksum == digest(rebuilt):
+        return True
+    if checksum != original_sha:
+        return False
+    with published.open("rb") as old, rebuilt.open("rb") as new:
+        new_header = new.readline()
+        header, candidate = json.loads(old.readline()), json.loads(new_header)
+        for obj in (header, candidate):
+            if not obj.pop("author_files", None):
+                return False
+        if header != candidate:
+            return False
+        candidate_hash = sha256(new_header)
+        previous = old.readline()
+        for following in old:
+            row = new.readline()
+            if row != previous:
+                return False
+            candidate_hash.update(row)
+            previous = following
+        last = new.readline()
+        if not last or not previous or new.read(1):
+            return False
+        footer, regenerated = json.loads(previous), json.loads(last)
+        if footer.get("type") != "summary" or regenerated.pop("body_sha256", None) != candidate_hash.hexdigest():
+            return False
+        footer.pop("body_sha256")
+        return footer == regenerated
 
 
 def emit(out, h, record):
@@ -204,7 +240,7 @@ def build(path):
         try:
             os.link(temp, path)
         except FileExistsError:
-            ensure(not path.is_symlink() and digest(path) == digest(temp),
+            ensure(same_corpus(path, temp, "5187779fc940c9ff19adaa90fee2233b9ea5815a5acb74420b0f012af12ae50e"),
                    "Existing weekly TRAIN differs; publish revisions separately")
         return summary
     finally:

@@ -254,7 +254,7 @@ def validate_schedules(schedules, saved_totals):
         raise ValueError('Frozen token-budget receipt differs from its schedules')
 
 
-def load_source(runs, source_id):
+def load_source(runs, source_id, *, archived=False):
     import run as runner
     directory = source_directory(runs, source_id)
     manifest = read(directory / 'experiment.json')
@@ -271,8 +271,13 @@ def load_source(runs, source_id):
     for value in manifest['origin'].values():
         if isinstance(value, dict) and {'path', 'bytes', 'sha256'} <= value.keys():
             static.append(value)
+    source_code = manifest['code']
+    if archived:
+        from source_provenance import verify_sources
+        verify_sources(ROOT, source_code)
     for entry in static:
-        verify(entry)
+        if not archived or entry not in source_code['files']:
+            verify(entry)
     revision = manifest['revision']
     if (revision.get('id') != h.REFERENCE_REVISION
             or revision.get('io_recovery', {}).get('id') != h.CHECKPOINT_IO_RECOVERY):
@@ -321,7 +326,12 @@ def load_source(runs, source_id):
     computed, experiments = h.make_identities(runner, original, config, assets, schedules,
                                               manifest['runtime'], manifest['origin'], prepared)
     for name, identity in computed.items():
-        identity['code'] = validate_code_identity(identity['code'], identities[name]['code'])
+        original_code = identities[name]['code']
+        if archived:
+            verify_sources(ROOT, original_code)
+            identity['code'] = original_code
+        else:
+            identity['code'] = validate_code_identity(identity['code'], original_code)
     if computed != identities:
         raise ValueError('Frozen worker identity, recipe or TRAIN membership changed')
     static += [record(directory / 'identities.json'), record(directory / 'token-budget.json'), train[1]]
@@ -403,14 +413,20 @@ def snapshot_source(source):
             'original_result_present': source['result_was_present']}
 
 
-def validate_completion(manifest, source, output):
+def validate_completion(manifest, source, output, *, archived=False):
     if (manifest.get('policy') != POLICY or manifest.get('source_manifest') != record(source['directory'] / 'experiment.json')
             or manifest.get('source_directory') != str(source['directory'].relative_to(ROOT))
             or manifest.get('inherited_budget') != source['budget']
-            or manifest.get('code', {}).get('files') != code_record(ROOT, ['finish_history.py'])['files']):
+            or (not archived and manifest.get('code', {}).get('files') != code_record(ROOT, ['finish_history.py'])['files'])):
         raise ValueError('Completion protocol or source binding changed')
+    if archived:
+        if [entry['path'] for entry in manifest['code']['files']] != ['finish_history.py']:
+            raise ValueError('Unexpected completion source inventory')
+        from source_provenance import verify_sources
+        verify_sources(ROOT, manifest['code'])
     for entry in manifest['source_snapshot']['immutable']:
-        verify(entry)
+        if not archived or entry not in source['manifest']['code']['files']:
+            verify(entry)
     for entry in manifest['source_snapshot']['append_only_prefixes']:
         verify_prefix(entry)
     for admitted in manifest['source_snapshot']['admitted_latest_checkpoints']:
@@ -475,10 +491,13 @@ def completion_artifacts(output):
 
 
 def load_completed_source(runs, source_id, *, require_quality=True):
-    source = load_source(runs, source_id)
+    source = load_source(runs, source_id, archived=True)
     output = safe(source['directory'] / COMPLETION_NAME)
     manifest = read(output / 'experiment.json')
-    validate_completion(manifest, source, output)
+    def verify_closed():
+        validate_completion(manifest, source, output, archived=True)
+
+    verify_closed()
     result = read(output / 'result.json')
     if (result.get('identity_sha256') != h.digest(manifest) or result.get('completion_policy') != POLICY
             or len(result.get('pairs', [])) != 1 or result['pairs'][0].get('seed') != SEED
@@ -497,7 +516,7 @@ def load_completed_source(runs, source_id, *, require_quality=True):
     if result.get('artifacts') != completion_artifacts(output):
         raise ValueError('Completion artifact inventory changed')
     stages = CompletionStages(source['directory'], output, h.digest(source['manifest']), h.digest(manifest),
-                              None, verify=lambda: validate_completion(manifest, source, output))
+                              None, verify=verify_closed)
     def no_action(*unused):
         raise ValueError('A terminal completion is missing its complete stage receipts')
     baseline = stages.run('baseline', no_action, lambda value: validate_evaluation(source, 'baseline', value))
@@ -521,7 +540,7 @@ def load_completed_source(runs, source_id, *, require_quality=True):
     for name, evaluated in students.items():
         if require_quality and evaluated['score'].get('infrastructure_failures'):
             raise ValueError(f'{name} has source evaluation infrastructure failures')
-    evidence = source['static'] + result['artifacts'] + [record(output / 'result.json')]
+    evidence = [e for e in source['static'] if e not in source['manifest']['code']['files']] + result['artifacts'] + [record(output / 'result.json')]
     for candidate in students.values():
         evidence.extend(candidate[key] for key in ('checkpoint', 'observations', 'timings'))
     return {'directory': source['directory'], 'manifest': source['manifest'], 'result': result,
@@ -533,12 +552,14 @@ def compare(args):
     import run as runner
     runs = safe(args.runs)
     with execution_lease(runs):
-        source = load_source(runs, args.source_run_id)
-        output = safe(source['directory'] / COMPLETION_NAME)
-        if safe(output / 'result.json').exists():
+        directory = source_directory(runs, args.source_run_id)
+        if safe(directory / COMPLETION_NAME / 'result.json').exists():
+            output = directory / COMPLETION_NAME
             completed = load_completed_source(runs, args.source_run_id, require_quality=False)
             h.print_summary(completed['result'], output / 'result.json')
             return completed['result']
+        source = load_source(runs, args.source_run_id)
+        output = safe(source['directory'] / COMPLETION_NAME)
         hardware = runner.four_gpu_identity()
         if hardware != source['manifest']['runtime']:
             raise ValueError('Use the original Python environment and four allocated GPUs')

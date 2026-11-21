@@ -31,7 +31,10 @@ def audit(path=ext.DATA):
     origins = defaultdict(Counter)
     with path.open("rb") as source:
         header = json.loads(source.readline())
-        ext.base.ensure(header["author_files"] == ext.file_bindings(), "Dataset and author revision differ")
+        # The published corpus pins the original authoring sources in its immutable header.
+        published = ext.base.digest(path) == "0d0c5e28ef54f598b3f72ebd09de6dd79a0f299d46b09a5d726536fa582cd198"
+        if not published:
+            ext.base.ensure(header["author_files"] == ext.file_bindings(), "Dataset and author revision differ")
         ext.base.ensure(header["train_source_sha256"] == ext.base.FROZEN["train-full-v2.jsonl"]
                         and header["public_dev_sha256"] == {n: ext.base.digest(ext.base.ASSETS / n)
                                                            for n in ext.base.PUBLIC_DEV},

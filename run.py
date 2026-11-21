@@ -1,6 +1,6 @@
 """Train, evaluate, and inspect frozen GEM-pRF cluster experiments."""
 
-from private_runtime import configure_private_runtime
+from private_runtime import configure_private_runtime, python_tool
 
 configure_private_runtime()
 
@@ -22,6 +22,7 @@ from tempfile import TemporaryDirectory
 from time import monotonic, sleep, time, time_ns
 from types import SimpleNamespace
 
+from source_provenance import runtime_sources
 from ledger import SAFE_ID, code_record, execution_lease, file_record, open_run, publish_json, read_result, report
 
 
@@ -259,13 +260,13 @@ def runtime_identity():
                                               text=True).splitlines()[0].strip(),
             "numpy": version("numpy"),
             "safetensors": version("safetensors"), "tokenizers": version("tokenizers"),
-            "node": subprocess.check_output(["node", "--version"], text=True).strip()}
+            "evaluator": "native-python-v1"}
 
 
 def run_identity(experiment_id, config, experiment, assets, train_record, *, runtime=None):
     code = ["run.py", "model.py", "ledger.py", "private_runtime.py", "cluster",
-            "evaluate.mjs", "requirements.txt", "experiments.json"]
-    code.extend(path.relative_to(ROOT).as_posix() for path in (ROOT / "evaluation").glob("*.mjs"))
+            "eval_tools/evaluate.py", "requirements.txt", "experiments.json"]
+    code.extend(runtime_sources(ROOT))
     suite = config.get("volume") or config.get("full")
     if suite:
         code.append(FULL_CONFIG.name if "full" in config else VOLUME_CONFIG.name)
@@ -276,7 +277,7 @@ def run_identity(experiment_id, config, experiment, assets, train_record, *, run
         evaluation.update(split="DEV-VOLUME", suite=suite["evaluation"])
         recipe.update(milestones=experiment.get("milestones", []), pilot=suite["pilot"])
     return {"experiment_id": experiment_id, "architecture_id": ARCHITECTURE,
-            "architecture": config["architecture"], "code": code_record(ROOT, code),
+            "architecture": config["architecture"], "code": code_record(ROOT, sorted(set(code))),
             "recipe": recipe,
             "runtime": runtime_identity() if runtime is None else runtime, "train": train_record,
             "evaluation": evaluation,
@@ -647,7 +648,7 @@ def evaluate_model(runtime, tokenizer_path, registry_path, dev_path, observation
     tokenizer.no_padding()
     if tokenizer.decode([STOP_TOKEN], skip_special_tokens=False) != "<start_function_response>":
         raise ValueError("Tokenizer terminal token differs")
-    command = ["node", str(ROOT / "evaluate.mjs"), str(registry_path), str(dev_path), str(observations)]
+    command = [*python_tool("eval_tools/evaluate.py"), str(registry_path), str(dev_path), str(observations)]
     expected = 700 if suite is None else suite["cases"]
     if suite is not None:
         command.extend((compact(suite), str(DISK_RESERVE_BYTES + RUN_METADATA_BUDGET_BYTES)))
@@ -733,7 +734,7 @@ def test(args, identity, experiment, assets, *, at=None, lease_held=False, deadl
 
 
 def check_evaluation(config, assets):
-    command = ["node", str(ROOT / "evaluate.mjs"), str(assets["registry"][0]), str(assets["dev"][0]), "--check"]
+    command = [*python_tool("eval_tools/evaluate.py"), str(assets["registry"][0]), str(assets["dev"][0]), "--check"]
     suite = config.get("volume") or config.get("full")
     if suite:
         command.append(compact(suite["evaluation"]))
