@@ -1,5 +1,8 @@
 """Regression checks for prompt-only inference, arm membership and interpretation."""
 from array import array
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -107,6 +110,56 @@ class TrainFitTests(unittest.TestCase):
         for passed, review, expected in [(90, 0, "high_seen_fit"), (88, 2, "resolve_reviews_first"),
                                          (87, 2, "inspect_misses_then_test_longer_training")]:
             self.assertEqual(fit.assess({"passed": passed, "total": 100, "unresolved": review}), expected)
+
+
+class OutputRevisionTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        self.output = root / "runs/new-train-fit-v1"
+        self.output.mkdir(parents=True)
+        self.receipt = self.output / "experiment.json"
+        self.manifest = {
+            "protocol": "new-train-fit-v1", "inputs_sha256": "frozen", "arms": {"ordinary-1729": {}},
+            "code": [{"path": "eval_tools/new_train_fit.py"}],
+        }
+        self.legacy = dict(self.manifest, code=[{"path": "new_train_fit.mjs"}])
+        self.enterContext(patch.object(fit, "ROOT", root))
+        self.enterContext(patch.object(fit, "OUTPUT", self.output))
+
+    def save(self, receipt):
+        self.receipt.write_text(json.dumps(receipt), encoding="utf-8")
+
+    def test_new_and_matching_runs_keep_their_path(self):
+        self.assertEqual(fit.choose_output(self.manifest), self.output)
+        self.save(self.manifest)
+        self.assertEqual(fit.choose_output(self.manifest), self.output)
+
+    def test_legacy_receipt_and_empty_arm_survive_python_restart(self):
+        self.save(self.legacy)
+        original = self.receipt.read_bytes()
+        (self.output / "ordinary-1729").mkdir()
+        revision = self.output / fit.PYTHON_REVISION
+        self.assertEqual(fit.choose_output(self.manifest), revision)
+        revision.mkdir(parents=True)
+        (revision / "experiment.json").write_text(json.dumps(self.manifest))
+        self.assertEqual(fit.choose_output(self.manifest), revision)
+        self.assertEqual(self.receipt.read_bytes(), original)
+
+    def test_changing_frozen_inputs_or_leaving_generations_prevents_revision(self):
+        self.save(dict(self.legacy, inputs_sha256="different"))
+        with self.assertRaisesRegex(ValueError, "Frozen TRAIN-fit record differs"):
+            fit.choose_output(self.manifest)
+        self.save(self.legacy)
+        arm = self.output / "ordinary-1729"
+        arm.mkdir()
+        recorded = arm / "gpu-0.jsonl"
+        recorded.write_text("saved generation\n")
+        with self.assertRaisesRegex(ValueError, "contains results"):
+            fit.choose_output(self.manifest)
+        self.assertEqual(recorded.read_text(), "saved generation\n")
+        self.assertFalse((self.output / fit.PYTHON_REVISION).exists())
 
 
 if __name__ == "__main__":

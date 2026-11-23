@@ -10,7 +10,7 @@ import json
 from diagnose import EvaluatorRPC
 from ledger import execution_lease, file_record, publish_json
 from diagnostics.new_fit_inputs import iter_cases, load_inputs
-from diagnostics.new_fit_workers import FitBudget, LIMIT, OUTPUT, ROOT, RUNS, generate_arm
+from diagnostics.new_fit_workers import FitBudget, LIMIT, OUTPUT, PYTHON_REVISION, ROOT, RUNS, generate_arm
 from private_runtime import private_directory
 from diagnostics.student_evidence import digest, read
 
@@ -36,6 +36,33 @@ def freeze(path, value, budget):
     size_bound = len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode()) + 4096
     with budget.writing(size_bound):
         publish_json(path, value)
+
+
+def choose_output(manifest):
+    """Keep a pre-migration receipt intact when no generations were recorded."""
+    receipt = OUTPUT / "experiment.json"
+    if not receipt.exists() and not receipt.is_symlink():
+        return OUTPUT
+    require(receipt.is_file() and not receipt.is_symlink(), f"Invalid TRAIN-fit receipt: {receipt}")
+    saved = read(ROOT, receipt)
+    if saved == manifest:
+        return OUTPUT
+
+    require(isinstance(saved, dict), f"Invalid TRAIN-fit receipt: {receipt}")
+    code = saved.get("code")
+    same_inputs = {k: v for k, v in saved.items() if k != "code"} == {
+        k: v for k, v in manifest.items() if k != "code"
+    }
+    require(same_inputs and isinstance(code, list) and any(
+        isinstance(entry, dict) and entry.get("path") == "new_train_fit.mjs" for entry in code
+    ), f"Frozen TRAIN-fit record differs: {receipt}")
+    for path in OUTPUT.iterdir():
+        if path == receipt:
+            continue
+        require(path.is_dir() and not path.is_symlink(), f"Previous TRAIN-fit run contains results: {path}")
+        require(path.name == PYTHON_REVISION.parts[0] or (path.name in saved["arms"] and not any(path.iterdir())),
+                f"Previous TRAIN-fit run contains results: {path}")
+    return OUTPUT / PYTHON_REVISION
 
 
 def text_sha(value):
@@ -175,10 +202,6 @@ def main():
     with execution_lease(RUNS) as lease:
         print("Verifying the saved transfer result, checkpoints and exact TRAIN schedules...", flush=True)
         inputs = load_inputs()
-        budget = FitBudget(OUTPUT)
-        if not OUTPUT.exists():
-            budget.require(8192)
-        private_directory(ROOT, OUTPUT.relative_to(ROOT))
         files = [ROOT / n for n in sorted({*READER_FILES, "source_provenance.py", *runtime_sources(ROOT)})]
         manifest = {"protocol": "new-train-fit-v1", "inputs_sha256": digest(inputs),
                     "source_result_sha256": inputs["source_result_sha256"], "train": inputs["train"],
@@ -188,7 +211,15 @@ def main():
                     "code": [file_record(p, relative_to=ROOT) for p in files],
                     "generation": {"max_new_tokens": LIMIT, "stop_token_id": 50, "mode": "native_greedy_fp32"},
                     "primary": "delivered answer and resulting dialogue state, excluding unresolved reviews"}
-        freeze(OUTPUT / "experiment.json", manifest, budget)
+        output = choose_output(manifest)
+        if output != OUTPUT:
+            print(f"Preserving previous TRAIN-fit receipt. Python run: {output}", flush=True)
+        budget = FitBudget(output)
+        if not output.exists():
+            new_directories = max(1, len(output.relative_to(OUTPUT).parts))
+            budget.require(8192 * new_directories)
+        private_directory(ROOT, output.relative_to(ROOT))
+        freeze(output / "experiment.json", manifest, budget)
         decoder = Tokenizer.from_file(str(ROOT / inputs["tokenizer"]["path"]))
         decoder.no_padding()
         decoder.no_truncation()
@@ -196,8 +227,8 @@ def main():
             rpc.request({"action": "init", "receipts": str(ROOT / inputs["prefix_receipts"]["path"]),
                          "contexts": str(ROOT / inputs["contexts"]["path"])}, "initialized")
             prepared = prepare(inputs, decoder, rpc)
-            result = evaluate(inputs, prepared, rpc, digest(manifest), OUTPUT, lease, budget)
-        path = OUTPUT / "result.json"
+            result = evaluate(inputs, prepared, rpc, digest(manifest), output, lease, budget)
+        path = output / "result.json"
         freeze(path, result, budget)
         print_summary(result, path)
 

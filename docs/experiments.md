@@ -89,6 +89,8 @@ The saved fresh DEV score provides a transfer check. High fit on branch-unique T
 
 Results are written under `runs/new-train-fit-v1/` within the existing disk allowance. Repeating the command verifies and reuses saved generations. It performs no training and uses the existing DEV report without regenerating answers.
 
+If the previous JavaScript runner saved only its experiment receipt for the same inputs, the Python run writes to `runs/new-train-fit-v1/revisions/python-v1/`. The previous receipt stays in place. A previous run with recorded generations requires its original implementation.
+
 ## Saved error reports
 
 Run these CPU reports from the repository root on a checkout with the saved results.

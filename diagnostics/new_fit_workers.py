@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKER_MODULE = __name__ if __name__ != "__main__" else "diagnostics.new_fit_workers"
 RUNS = ROOT / "runs"
 OUTPUT = RUNS / "new-train-fit-v1"
+PYTHON_REVISION = Path("revisions/python-v1")
 GPUS = 4
 LIMIT = 512
 STOP = 50
@@ -32,7 +33,7 @@ def encode(value):
 class FitBudget:
     def __init__(self, output):
         import diagnose
-        if Path(output) != OUTPUT:
+        if Path(output) not in (OUTPUT, OUTPUT / PYTHON_REVISION):
             raise ValueError("Unexpected TRAIN fit output directory")
         self.output = Path(output)
         self.lock = Lock()
@@ -48,8 +49,9 @@ class FitBudget:
                     "inspect_transfer.py", "diagnostics/saved_transfer.py", "tests/test_inspect_transfer.py", "tests/test_saved_transfer.py")
         sources = {p for pattern in patterns for p in ROOT.glob(pattern) if p.is_file()}
         paths = [p for p in RUNS.glob("semantic-transfer-v1*") if p != self.previous.output]
-        if self.output.exists():
-            paths.append(self.output)
+        fit_runs = RUNS / OUTPUT.name
+        if fit_runs.exists():
+            paths.append(fit_runs)
         allocation = {}
         for top in [*paths, *sources]:
             for path in [top, *top.rglob("*")] if top.is_dir() else [top]:

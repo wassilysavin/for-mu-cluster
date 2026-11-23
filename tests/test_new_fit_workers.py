@@ -194,6 +194,30 @@ class WorkerProcessTests(unittest.TestCase):
 
 
 class BudgetTests(unittest.TestCase):
+    def test_python_revision_charges_both_old_and_new_fit_files(self):
+        import diagnose
+        with TemporaryDirectory(dir=workers.ROOT / ".runtime/tmp") as tmp:
+            root = Path(tmp)
+            runs = root / "runs"
+            output = runs / "new-train-fit-v1"
+            revision = output / workers.PYTHON_REVISION
+            revision.mkdir(parents=True)
+            previous = runs / "train-fit-reference-v1"
+            previous.mkdir()
+            (previous / "disk-budget.json").touch()
+            baseline = SimpleNamespace(output=previous, usage=lambda: {"charged_bytes": 0})
+            with (patch.object(workers, "ROOT", root), patch.object(workers, "RUNS", runs),
+                  patch.object(workers, "OUTPUT", output),
+                  patch.object(diagnose, "DiskBudget", return_value=baseline),
+                  patch.object(workers.shutil, "disk_usage", return_value=SimpleNamespace(free=10**12))):
+                budget = workers.FitBudget(revision)
+                before = budget.require(1)
+                receipt = output / "experiment.json"
+                receipt.write_bytes(b"x" * 48000)
+                raw = revision / "gpu-0.jsonl"
+                raw.write_bytes(b"x" * 48000)
+                self.assertGreaterEqual(before - budget.require(1), 96000)
+
     def test_old_artifacts_count_new_hardlinks_once_and_respect_physical_reserve(self):
         import diagnose
         with TemporaryDirectory(dir=workers.ROOT / ".runtime/tmp") as tmp:
