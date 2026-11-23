@@ -312,7 +312,8 @@ def enrich_known(score, rows, data):
         r.get("critical_category") or "+".join(sorted(r.get("reasons", []))) or "unspecified" for r in detected))
 
 
-def evaluate(directory, name, checkpoint, step, assets, config, manifest, fresh_spec, space, inherited):
+def evaluate(directory, name, checkpoint, step, assets, config, manifest, fresh_spec, space, inherited,
+             *, deadline=None):
     output = private_directory(ROOT, (directory / name).relative_to(ROOT))
     model = record(checkpoint)
     binding = history.digest({"manifest": history.digest(manifest), "checkpoint": model, "model": name})
@@ -323,6 +324,7 @@ def evaluate(directory, name, checkpoint, step, assets, config, manifest, fresh_
     with ExitStack() as stack:
         def generate(prompt):
             nonlocal generator
+            run.check_deadline(deadline)
             if generator is None:
                 generator = stack.enter_context(provider(checkpoint, assets, step))
             return generator(prompt)
@@ -361,6 +363,7 @@ def evaluate(directory, name, checkpoint, step, assets, config, manifest, fresh_
                     failures = history.infrastructure_failures(rows)
                     score["infrastructure_failures"] = max(score.get("infrastructure_failures", 0), len(failures))
                     score.pop("results", None)
+                run.check_deadline(deadline)
                 value = {"binding": binding, "observations": [record(path) for path in paths], "score": score}
                 value["receipt_sha256"] = history.digest(value)
                 space.require(len(history.canonical(value).encode()) + 65536)

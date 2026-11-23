@@ -29,7 +29,17 @@ To verify every example on CPU from this checkout, run
 ./cluster python -u extended_train.py check
 ```
 
-Use `extended_train.iter_batches(arm="full", updates=..., seed=1729)` or `arm="matched"` for the planned experiment. The command above validates the data. The corpus profile, balance of the two schedules, research review, known limitations and evaluation plan are in the [dataset audit](train-audit.md). To reproduce the corpus inventory, exact-wording probe and schedule totals, run `./cluster python audit_week_train.py`.
+After the step-8151 TRAIN-fit report is complete, run this from the repository root in the existing cluster tmux session with the virtual environment active.
+
+```sh
+./cluster git pull --ff-only && ./cluster python -u week_compare.py --gpus 4
+```
+
+The two arms run sequentially on four V100s. Each starts from the saved step-7991 checkpoint with its FP32 Adafactor state and completes 4,044 updates. The matched arm draws from 5,169 distinct examples, the full arm from 16,174. Each arm makes 16,176 draws with the same stratum at each position. The runner reads the packed corpus directly and records exact draw hashes and token totals. The small arm has one update in which the frozen schedule repeats an example.
+
+A two-update numerical pilot must pass before training. The run ends at step 12035 for both arms and compares their final checkpoints on the same public DEV233, DEV155 and DEV1250 as the authenticated baseline. The primary metric is the supported answer plus state score on the DEV233 closed-loop panel. The report includes paired uncertainty by scenario family and separates this diagnostic result from checkpoint promotion.
+
+The deadline is 168 elapsed hours from the initial launch, including interruptions and evaluation. Both arms share the existing disk accounting and 512 MiB physical reserve. After interruption, rerun the Python command with the same checkout to reuse the saved checkpoint and observation journals. The report is `runs/week-train-volume-v2/result.json`. To verify both schedule hashes and exposure totals without GPU work, run `./cluster python -u week_compare.py --check`. The [dataset audit](train-audit.md) describes the corpus, overlap checks and limitations.
 
 ## Original weekly TRAIN for FunctionGemma
 
@@ -45,7 +55,7 @@ This CPU check reads the published dataset and validates every native token rece
 
 **Planned experiment.** First complete the existing step-8151 TRAIN-fit diagnostic. Keep step 7991 as the weekly baseline. Compare +160 updates on the weekly set with the baseline on the same DEV, then evaluate after the first full pass (+1,293 updates). A second pass (+2,585 cumulative updates) is worth testing if longer training is improving transfer and preserving previously supported tasks. Examine complete dialogues, literal quotations, critical errors, out-of-scope requests, unresolved reviews and earlier DEV regressions alongside supported answers. If TRAIN is already well learned and DEV stalls, investigate the first divergent turn on actual model trajectories.
 
-The proposed limit is 168 elapsed hours for the whole experiment on four V100s, including evaluations. As a planning allowance, allocate up to 120 hours for training and 48 for diagnostics, evaluation and interruptions. A previous 2,358-update course took 15.83 hours including three DEV155 checks. At an assumed 25–35 seconds per update the first pass is about 9–13 training hours before separate evaluations. Measure throughput on this corpus before scheduling later checkpoints. This branch publishes the dataset and reader; the check command does not start a timed training job.
+The original dataset remains available for inspection and rebuilds. The volume comparison above draws the matched control from the expanded corpus.
 
 The 1,472 new dialogue rows use 384 authored history families and recurring language patterns. The 740 compositions use 370 families, including both orderings. Executing gold calls verifies compatibility with the frozen application. Independent scientific adjudication and performance on real user dialogues require separate evidence.
 
