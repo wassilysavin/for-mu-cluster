@@ -20,6 +20,7 @@ The published dataset has **16,174 examples**. Its size comparison uses a matche
 | Measure TRAIN fit of both saved checkpoints on four allocated GPUs | `./cluster python -u check_new_train_fit.py --gpus 4` |
 | Compare 5,169 and 16,174 TRAIN examples after TRAIN fit completes | `./cluster python -u week_compare.py --gpus 4` |
 | Read the saved weekly comparison across all DEV panels | `./cluster python -m diagnostics.inspect_week_comparison` |
+| Inspect saved DEV155 losses and new DEV1250 critical flags | `./cluster python -m diagnostics.inspect_week_failures` |
 | Run the regression tests on CPU | `./cluster python -m unittest discover -s tests -t .` |
 
 The GPU diagnostic uses the completed semantic-transfer run and its two step-8151 checkpoints. The weekly dataset check runs independently. Installation, experiment-specific dependencies, training commands, original limits and restart procedures are in the [experiment guide](docs/experiments.md).
