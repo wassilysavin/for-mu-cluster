@@ -60,14 +60,24 @@ class WeeklyArgumentTraceTests(unittest.TestCase):
         self.assertIn("execute | call 1 change_get_default_value", result)
         self.assertIn("get_default_value function contract | $.subject=<missing>", result)
 
+    def test_stateful_group_error_stays_at_batch_scope(self):
+        starter = call("get_value_guidance", _clarify=True, _each="subject")
+        self.before = self.save_exchange([starter])["after"]
+        result = self.trace([call("get_value_guidance", _resolve="t1.p1", subject="TR", preprocessing="fMRIPrep")])
+        self.assertIn("execute | full batch", result)
+        self.assertIn("t1.p1", result)
+
     def test_only_observed_supported_regressions_are_counted(self):
         bad = self.save_exchange([call("get_default_value")], "new")
         blocked = {**bad, "case_id": "blocked", "status": "blocked"}
         passed = {"success": True, "critical_status": "none_observed"}
         review = {"success": False, "critical_status": "review_required"}
         cids = ("new", "blocked")
-        saved = {"baseline": dict.fromkeys(cids, passed), "matched": dict.fromkeys(cids, review),
-                 "full": dict.fromkeys(cids, passed)}
+        saved = {
+            "baseline": dict.fromkeys(cids, passed),
+            "matched": dict.fromkeys(cids, review),
+            "full": dict.fromkeys(cids, passed),
+        }
         plan = {cid: {"cohort": "supported"} for cid in cids}
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "legacy155.jsonl"
