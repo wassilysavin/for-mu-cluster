@@ -98,7 +98,7 @@ def observations(paths, plan, split, expected_summary):
     return selected
 
 
-def load(root):
+def load_evidence(root):
     result = load_report(root)
     directory = root / "runs" / RUN_ID
     manifest = read(root, directory / "experiment.json")
@@ -114,13 +114,20 @@ def load(root):
         "legacy1250": {row["case_id"]: row for rows in read(root, actual)["panels"].values() for row in rows},
     }
     saved = {split: {} for split in SPLITS}
+    journals = {split: {} for split in SPLITS}
     for name in MODELS:
         model = result["models"][name]
         binding = parent["identity_sha256"] if name == "baseline" else result["identity_sha256"]
         for split in SPLITS:
             paths = stage_files(root, directory, name, split, model, binding)
+            journals[split][name] = paths
             saved[split][name] = observations(paths, plans[split], split, model["scores"][split]["summary"])
-    return plans, saved
+    return plans, saved, journals
+
+
+def load(root):
+    plan, saved, _ = load_evidence(root)
+    return plan, saved
 
 
 def passed(row):
