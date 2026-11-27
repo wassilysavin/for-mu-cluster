@@ -19,6 +19,20 @@ For the Qwen diagnostic or its CPU regression suite, also install the three refe
 
 A full Git checkout retains the historical source blobs used to authenticate older receipts. The [original experiment implementation](https://github.com/wassilysavin/for-mu-cluster/tree/013f8878f9658229f1c65d72af2a314db7631b7b) remains available for resuming a run created with that implementation.
 
+## Targeted TRAIN supplement and dialogue DEV
+
+`assets/targeted-train-v1.jsonl` adds 141 examples for the errors shared by both weekly checkpoints. In 24 dialogue families, the same question follows four different histories. A prior failure can shift an answer ID, remove the requested answer or leave another clarification pending. Another 45 examples cover function selection and argument shape or values. The check verifies that 37 invalid argument mutations fail at execution.
+
+`assets/targeted-dev-v1.json` contains nine new five-turn dialogues and 24 fixed-history or standalone challenges. For the dialogue panel, each next prompt must use the model's actual history. The evaluator resolves the expected reference against that history. The audit executes the gold path and checks how the remaining turns behave after an error at each of the first four positions. It also checks normalized wording for overlap against published TRAIN and DEV files. `assets/targeted-corpus-v1.json` records corpus and authoring hashes.
+
+Verify both assets on CPU from the repository root.
+
+```sh
+./cluster python -m training.targeted_dialogues check
+```
+
+Use this TRAIN as a supplement to the weekly corpus. In a paired experiment, start from the same checkpoint, keep the optimizer and update budget fixed, and replace matched replay slots with targeted cases in one arm. Evaluate both arms on the fresh targeted DEV and the frozen DEV233, DEV155 and DEV1250. Report whole dialogues, exact supported answers with correct state, critical errors and unresolved reviews. The targeted DEV is sized to diagnose these particular failures. The training and evaluation comparison is pending.
+
 ## Expanded weekly TRAIN and its size comparison
 
 The full dataset is `assets/week-train-v2.jsonl`. It preserves the original 5,169 examples and adds continuations of recorded histories, scientific questions with changing conditions, and mixed-scope requests. The data reader also supplies a 5,169-example subset drawn from this expanded mix for the size comparison. Both arms receive four examples per optimizer update and the same order of task types and token-length bins. The small arm revisits more examples.

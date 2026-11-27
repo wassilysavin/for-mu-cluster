@@ -1,0 +1,61 @@
+{
+  "authored_sources": {
+    "training/targeted_argument_cases.py": "f637c3f3f41f30e9a527eebe56a3d8cb95a55745140e2442352b74aea1052639",
+    "training/targeted_dev_cases.py": "74fd23cf8bf8a66fa7762827b8820e0f02bb01f6f5fea2198c4663b298e8187b",
+    "training/targeted_dialogues.py": "b1b7e759dc462e2de1696590a2239b9473871e595bf89ae79d0dfac6ce7cf07e",
+    "training/targeted_history_cases.py": "a480dd9c08393a32f10d95f20481c804427ac0523c1ce139216495399098c81c"
+  },
+  "dev": {
+    "bytes": 87361,
+    "cases": 69,
+    "checked_early_failure_paths": 36,
+    "groups": {
+      "function_arguments": 6,
+      "repeat_original": 21,
+      "replace_answer": 21,
+      "resolve_pending": 21
+    },
+    "panels": {
+      "challenge": 24,
+      "closed_loop": 45
+    },
+    "sha256": "d1796ff0318d02816f8e74833964c7dbb18bd311f0bc912ea6b5646937b91d45",
+    "whole_dialogues": 9
+  },
+  "public_dev_sha256": {
+    "actual-history-v3-dev.json": "0d10adef947b5cee3d4dba9f661f9c9561d13833b88df4dc94fc493624854326",
+    "dev-volume-v1.jsonl": "77450582e17c9c58656196047157227a58c0e8e42629c81cbe408337e9cd7e13",
+    "dev700.jsonl": "de732fad2ff49daacbc84730d87097df795849c7b5112c254d1186579513b67b",
+    "transfer-dev-v1.json": "9df60f65e30c8b0d54966b2a2076af1318810ac1cb3cfecd77457dc299c0ff7f"
+  },
+  "registry_file_sha256": "b006fbacf4fd0f7f423b9178c7f365e98a6cc91bc99d8c9a16277bfd5954d4d0",
+  "schema": "gemprf-targeted-dialogues-v1",
+  "separation": {
+    "dev_distinct_wordings": 75,
+    "normalized_cross_split_overlaps": 0,
+    "train_distinct_wordings": 133
+  },
+  "tokenizer_sha256": "b6b09a0b4a803ad453063ca4bb49a784540e8120004e2450e025df2b27d41fb2",
+  "train": {
+    "body_sha256": "450215c8ee512d13341587537fb57a7a5a32ade462d037d5a3e30a6d61f0cc28",
+    "bytes": 2023477,
+    "cases": 141,
+    "families_with_same_question_and_different_refs": 24,
+    "groups": {
+      "function_arguments": 45,
+      "repeat_original": 32,
+      "replace_answer": 32,
+      "resolve_pending": 32
+    },
+    "prefixes": 74,
+    "sha256": "fa3b9eb25b22f1da3f586b8a0426d13421915563358097cbd651b0d63f8bedf7",
+    "targeted_invalid_mutations_rejected": {
+      "invalid_arguments": 37
+    },
+    "tokens": {
+      "prompt": 2158162,
+      "target": 3792
+    },
+    "type": "summary"
+  }
+}

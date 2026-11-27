@@ -1,0 +1,2572 @@
+{
+  "panels": {
+    "challenge": [
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-radius-quote",
+        "case_id": "targeted-dev-challenge-radius-quote-earlier_pass",
+        "cohort": "supported",
+        "expected_targets": [
+          "t2.c2"
+        ],
+        "family_id": "targeted-dev-challenge-radius-quote",
+        "group": "repeat_original",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "visual_field"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "For a figure caption, what does visual_field set?"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "min_sigma"
+                },
+                "name": "get_units"
+              },
+              {
+                "arguments": {
+                  "subject": "visual_field_radius"
+                },
+                "name": "get_units"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Write my methods units in two parts: first min_sigma, then visual_field_radius."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "num_vertical_prfs"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "One unrelated axis setting: what is the documented role of num_vertical_prfs?"
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 2,
+          "target_exchange": 2
+        },
+        "question": "Copy only the radius-units part from the methods reply. If you never supplied it, ask which answer to copy.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-radius-quote",
+        "case_id": "targeted-dev-challenge-radius-quote-earlier_error",
+        "cohort": "supported",
+        "expected_targets": [
+          "t1.c2"
+        ],
+        "family_id": "targeted-dev-challenge-radius-quote",
+        "group": "repeat_original",
+        "initial_prefix": [
+          {
+            "expected_outcome": "error",
+            "question": "For a figure caption, what does visual_field set?",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "min_sigma"
+                },
+                "name": "get_units"
+              },
+              {
+                "arguments": {
+                  "subject": "visual_field_radius"
+                },
+                "name": "get_units"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Write my methods units in two parts: first min_sigma, then visual_field_radius."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "num_vertical_prfs"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "One unrelated axis setting: what is the documented role of num_vertical_prfs?"
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 2,
+          "target_exchange": 2
+        },
+        "question": "Copy only the radius-units part from the methods reply. If you never supplied it, ask which answer to copy.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-radius-quote",
+        "case_id": "targeted-dev-challenge-radius-quote-target_unavailable",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-challenge-radius-quote",
+        "group": "repeat_original",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "visual_field"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "For a figure caption, what does visual_field set?"
+          },
+          {
+            "expected_outcome": "error",
+            "question": "Write my methods units in two parts: first min_sigma, then visual_field_radius.",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "num_vertical_prfs"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "One unrelated axis setting: what is the documented role of num_vertical_prfs?"
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 2,
+          "target_exchange": 2
+        },
+        "question": "Copy only the radius-units part from the methods reply. If you never supplied it, ask which answer to copy.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-labels-quote",
+        "case_id": "targeted-dev-challenge-labels-quote-earlier_pass",
+        "cohort": "supported",
+        "expected_targets": [
+          "t2.c1"
+        ],
+        "family_id": "targeted-dev-challenge-labels-quote",
+        "group": "repeat_original",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "individual.run"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Explain the purpose of individual.run for my bookkeeping."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "space"
+                },
+                "name": "get_allowed_values"
+              },
+              {
+                "arguments": {
+                  "subject": "slice_time_ref"
+                },
+                "name": "get_allowed_values"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Give the documented options for space and then for slice_time_ref, separately."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "individual.ses"
+                },
+                "name": "get_default_value"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "For a different note, provide the default for individual.ses."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 1,
+          "target_exchange": 2
+        },
+        "question": "Fill in my registration note by copying the space options from the two-answer reply. If that scientific answer is absent, ask me to identify it.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-labels-quote",
+        "case_id": "targeted-dev-challenge-labels-quote-earlier_error",
+        "cohort": "supported",
+        "expected_targets": [
+          "t1.c1"
+        ],
+        "family_id": "targeted-dev-challenge-labels-quote",
+        "group": "repeat_original",
+        "initial_prefix": [
+          {
+            "expected_outcome": "error",
+            "question": "Explain the purpose of individual.run for my bookkeeping.",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "space"
+                },
+                "name": "get_allowed_values"
+              },
+              {
+                "arguments": {
+                  "subject": "slice_time_ref"
+                },
+                "name": "get_allowed_values"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Give the documented options for space and then for slice_time_ref, separately."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "individual.ses"
+                },
+                "name": "get_default_value"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "For a different note, provide the default for individual.ses."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 1,
+          "target_exchange": 2
+        },
+        "question": "Fill in my registration note by copying the space options from the two-answer reply. If that scientific answer is absent, ask me to identify it.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-labels-quote",
+        "case_id": "targeted-dev-challenge-labels-quote-target_unavailable",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-challenge-labels-quote",
+        "group": "repeat_original",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "individual.run"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Explain the purpose of individual.run for my bookkeeping."
+          },
+          {
+            "expected_outcome": "error",
+            "question": "Give the documented options for space and then for slice_time_ref, separately.",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "individual.ses"
+                },
+                "name": "get_default_value"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "For a different note, provide the default for individual.ses."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 1,
+          "target_exchange": 2
+        },
+        "question": "Fill in my registration note by copying the space options from the two-answer reply. If that scientific answer is absent, ask me to identify it.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-axis-replace",
+        "case_id": "targeted-dev-challenge-axis-replace-earlier_pass",
+        "cohort": "supported",
+        "expected_targets": [
+          "t2.c2"
+        ],
+        "family_id": "targeted-dev-challenge-axis-replace",
+        "group": "replace_answer",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "height"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "For the legend, define the role of height."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "height"
+                },
+                "name": "get_units"
+              },
+              {
+                "arguments": {
+                  "property": "spacing",
+                  "subject": "num_vertical_prfs"
+                },
+                "name": "explain_grid_axis_geometry"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "On my axis card, report the unit of height first and vertical-axis spacing second."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "width"
+                },
+                "name": "explain_code_usage"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "I also want to know where width is processed in code."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "property": "zero_inclusion",
+                "subject": "num_vertical_prfs"
+              },
+              "name": "explain_grid_axis_geometry"
+            }
+          ],
+          "kind": "replace",
+          "part": 2,
+          "target_exchange": 2
+        },
+        "question": "Edit just the vertical-spacing answer on the axis card to discuss zero inclusion on that axis. If the prior subanswer is missing, answer zero inclusion alone.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-axis-replace",
+        "case_id": "targeted-dev-challenge-axis-replace-earlier_error",
+        "cohort": "supported",
+        "expected_targets": [
+          "t1.c2"
+        ],
+        "family_id": "targeted-dev-challenge-axis-replace",
+        "group": "replace_answer",
+        "initial_prefix": [
+          {
+            "expected_outcome": "error",
+            "question": "For the legend, define the role of height.",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "height"
+                },
+                "name": "get_units"
+              },
+              {
+                "arguments": {
+                  "property": "spacing",
+                  "subject": "num_vertical_prfs"
+                },
+                "name": "explain_grid_axis_geometry"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "On my axis card, report the unit of height first and vertical-axis spacing second."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "width"
+                },
+                "name": "explain_code_usage"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "I also want to know where width is processed in code."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "property": "zero_inclusion",
+                "subject": "num_vertical_prfs"
+              },
+              "name": "explain_grid_axis_geometry"
+            }
+          ],
+          "kind": "replace",
+          "part": 2,
+          "target_exchange": 2
+        },
+        "question": "Edit just the vertical-spacing answer on the axis card to discuss zero inclusion on that axis. If the prior subanswer is missing, answer zero inclusion alone.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-axis-replace",
+        "case_id": "targeted-dev-challenge-axis-replace-target_unavailable",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-challenge-axis-replace",
+        "group": "replace_answer",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "height"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "For the legend, define the role of height."
+          },
+          {
+            "expected_outcome": "error",
+            "question": "On my axis card, report the unit of height first and vertical-axis spacing second.",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "width"
+                },
+                "name": "explain_code_usage"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "I also want to know where width is processed in code."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "property": "zero_inclusion",
+                "subject": "num_vertical_prfs"
+              },
+              "name": "explain_grid_axis_geometry"
+            }
+          ],
+          "kind": "replace",
+          "part": 2,
+          "target_exchange": 2
+        },
+        "question": "Edit just the vertical-spacing answer on the axis card to discuss zero inclusion on that axis. If the prior subanswer is missing, answer zero inclusion alone.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-path-replace",
+        "case_id": "targeted-dev-challenge-path-replace-earlier_pass",
+        "cohort": "supported",
+        "expected_targets": [
+          "t2.c1"
+        ],
+        "family_id": "targeted-dev-challenge-path-replace",
+        "group": "replace_answer",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "results_anaylsis_id"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "What is the purpose of results_anaylsis_id?"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "BIDS.basepath"
+                },
+                "name": "explain_purpose"
+              },
+              {
+                "arguments": {
+                  "aspect": "filesystem_object_kind",
+                  "subject": "stimulus.directory"
+                },
+                "name": "describe_path_target"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "On my setup card put the meaning of BIDS.basepath first and the file type accepted by stimulus.directory second."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "stimulus_filepath"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "New topic: what role does stimulus_filepath have?"
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "BIDS.basepath"
+              },
+              "name": "explain_path_portability"
+            }
+          ],
+          "kind": "replace",
+          "part": 1,
+          "target_exchange": 2
+        },
+        "question": "Amend only the BIDS.basepath part of the setup card to explain portability between machines. If that answer didn't appear, explain portability on its own.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-path-replace",
+        "case_id": "targeted-dev-challenge-path-replace-earlier_error",
+        "cohort": "supported",
+        "expected_targets": [
+          "t1.c1"
+        ],
+        "family_id": "targeted-dev-challenge-path-replace",
+        "group": "replace_answer",
+        "initial_prefix": [
+          {
+            "expected_outcome": "error",
+            "question": "What is the purpose of results_anaylsis_id?",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "BIDS.basepath"
+                },
+                "name": "explain_purpose"
+              },
+              {
+                "arguments": {
+                  "aspect": "filesystem_object_kind",
+                  "subject": "stimulus.directory"
+                },
+                "name": "describe_path_target"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "On my setup card put the meaning of BIDS.basepath first and the file type accepted by stimulus.directory second."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "stimulus_filepath"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "New topic: what role does stimulus_filepath have?"
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "BIDS.basepath"
+              },
+              "name": "explain_path_portability"
+            }
+          ],
+          "kind": "replace",
+          "part": 1,
+          "target_exchange": 2
+        },
+        "question": "Amend only the BIDS.basepath part of the setup card to explain portability between machines. If that answer didn't appear, explain portability on its own.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-path-replace",
+        "case_id": "targeted-dev-challenge-path-replace-target_unavailable",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-challenge-path-replace",
+        "group": "replace_answer",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "results_anaylsis_id"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "What is the purpose of results_anaylsis_id?"
+          },
+          {
+            "expected_outcome": "error",
+            "question": "On my setup card put the meaning of BIDS.basepath first and the file type accepted by stimulus.directory second.",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "stimulus_filepath"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "New topic: what role does stimulus_filepath have?"
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "BIDS.basepath"
+              },
+              "name": "explain_path_portability"
+            }
+          ],
+          "kind": "replace",
+          "part": 1,
+          "target_exchange": 2
+        },
+        "question": "Amend only the BIDS.basepath part of the setup card to explain portability between machines. If that answer didn't appear, explain portability on its own.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-filter-pending",
+        "case_id": "targeted-dev-challenge-filter-pending-earlier_pass",
+        "cohort": "supported",
+        "expected_targets": [
+          "t2.p1"
+        ],
+        "family_id": "targeted-dev-challenge-filter-pending",
+        "group": "resolve_pending",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "hemi"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "What does the hemi setting represent?"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "_clarify": true,
+                  "_missing": [
+                    "value"
+                  ],
+                  "subject": "refine_fitting.enable"
+                },
+                "name": "explain_boolean_effect"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Ask me for refine_fitting.enable before explaining what my setting changes."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "_clarify": true,
+                  "_missing": [
+                    "value"
+                  ],
+                  "subject": "hrf.use_from_file"
+                },
+                "name": "explain_boolean_effect"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Keep a separate unanswered item about hrf.use_from_file. You'll have to ask for its value too."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "refine_fitting.enable",
+                "value": false
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 2,
+          "values": {
+            "value": false
+          }
+        },
+        "question": "For the refine_fitting.enable question I've left open, the value is false. Leave the HRF item alone. Give the fitting effect by itself if this question never opened.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-filter-pending",
+        "case_id": "targeted-dev-challenge-filter-pending-earlier_error",
+        "cohort": "supported",
+        "expected_targets": [
+          "t1.p1"
+        ],
+        "family_id": "targeted-dev-challenge-filter-pending",
+        "group": "resolve_pending",
+        "initial_prefix": [
+          {
+            "expected_outcome": "error",
+            "question": "What does the hemi setting represent?",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "_clarify": true,
+                  "_missing": [
+                    "value"
+                  ],
+                  "subject": "refine_fitting.enable"
+                },
+                "name": "explain_boolean_effect"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Ask me for refine_fitting.enable before explaining what my setting changes."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "_clarify": true,
+                  "_missing": [
+                    "value"
+                  ],
+                  "subject": "hrf.use_from_file"
+                },
+                "name": "explain_boolean_effect"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Keep a separate unanswered item about hrf.use_from_file. You'll have to ask for its value too."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "refine_fitting.enable",
+                "value": false
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 2,
+          "values": {
+            "value": false
+          }
+        },
+        "question": "For the refine_fitting.enable question I've left open, the value is false. Leave the HRF item alone. Give the fitting effect by itself if this question never opened.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-filter-pending",
+        "case_id": "targeted-dev-challenge-filter-pending-target_unavailable",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-challenge-filter-pending",
+        "group": "resolve_pending",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "hemi"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "What does the hemi setting represent?"
+          },
+          {
+            "expected_outcome": "error",
+            "question": "Ask me for refine_fitting.enable before explaining what my setting changes.",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "_clarify": true,
+                  "_missing": [
+                    "value"
+                  ],
+                  "subject": "hrf.use_from_file"
+                },
+                "name": "explain_boolean_effect"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Keep a separate unanswered item about hrf.use_from_file. You'll have to ask for its value too."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "refine_fitting.enable",
+                "value": false
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 2,
+          "values": {
+            "value": false
+          }
+        },
+        "question": "For the refine_fitting.enable question I've left open, the value is false. Leave the HRF item alone. Give the fitting effect by itself if this question never opened.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-sigma-pending",
+        "case_id": "targeted-dev-challenge-sigma-pending-earlier_pass",
+        "cohort": "supported",
+        "expected_targets": [
+          "t2.p1"
+        ],
+        "family_id": "targeted-dev-challenge-sigma-pending",
+        "group": "resolve_pending",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "num_sigmas"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "For the first line, what does num_sigmas control?"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "_clarify": true,
+                  "_missing": [
+                    "value"
+                  ],
+                  "subject": "sigmas.use_from_file"
+                },
+                "name": "explain_boolean_effect"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "The effect depends on whether sigmas.use_from_file is on in my setup. Please ask for that setting first."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "_clarify": true,
+                  "_missing": [
+                    "value"
+                  ],
+                  "subject": "normalize"
+                },
+                "name": "explain_boolean_effect"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Separately ask for the value of normalize before you explain that effect."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "sigmas.use_from_file",
+                "value": true
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 2,
+          "values": {
+            "value": true
+          }
+        },
+        "question": "The value I withheld for sigmas.use_from_file is true. Resolve that item and keep normalize pending. If the sigma item is absent, explain its effect alone.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-sigma-pending",
+        "case_id": "targeted-dev-challenge-sigma-pending-earlier_error",
+        "cohort": "supported",
+        "expected_targets": [
+          "t1.p1"
+        ],
+        "family_id": "targeted-dev-challenge-sigma-pending",
+        "group": "resolve_pending",
+        "initial_prefix": [
+          {
+            "expected_outcome": "error",
+            "question": "For the first line, what does num_sigmas control?",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "_clarify": true,
+                  "_missing": [
+                    "value"
+                  ],
+                  "subject": "sigmas.use_from_file"
+                },
+                "name": "explain_boolean_effect"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "The effect depends on whether sigmas.use_from_file is on in my setup. Please ask for that setting first."
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "_clarify": true,
+                  "_missing": [
+                    "value"
+                  ],
+                  "subject": "normalize"
+                },
+                "name": "explain_boolean_effect"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Separately ask for the value of normalize before you explain that effect."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "sigmas.use_from_file",
+                "value": true
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 2,
+          "values": {
+            "value": true
+          }
+        },
+        "question": "The value I withheld for sigmas.use_from_file is true. Resolve that item and keep normalize pending. If the sigma item is absent, explain its effect alone.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-challenge-sigma-pending",
+        "case_id": "targeted-dev-challenge-sigma-pending-target_unavailable",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-challenge-sigma-pending",
+        "group": "resolve_pending",
+        "initial_prefix": [
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "subject": "num_sigmas"
+                },
+                "name": "explain_purpose"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "For the first line, what does num_sigmas control?"
+          },
+          {
+            "expected_outcome": "error",
+            "question": "The effect depends on whether sigmas.use_from_file is on in my setup. Please ask for that setting first.",
+            "raw_output": "<start_function_call>call:targeted_dev_unavailable_function{}<end_function_call><start_function_response>"
+          },
+          {
+            "calls": [
+              {
+                "arguments": {
+                  "_clarify": true,
+                  "_missing": [
+                    "value"
+                  ],
+                  "subject": "normalize"
+                },
+                "name": "explain_boolean_effect"
+              }
+            ],
+            "expected_outcome": "committed",
+            "question": "Separately ask for the value of normalize before you explain that effect."
+          }
+        ],
+        "panel": "challenge",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "sigmas.use_from_file",
+                "value": true
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 2,
+          "values": {
+            "value": true
+          }
+        },
+        "question": "The value I withheld for sigmas.use_from_file is true. Resolve that item and keep normalize pending. If the sigma item is absent, explain its effect alone.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-arguments-width-data",
+        "case_id": "targeted-dev-arguments-width-data-case",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-arguments-width-data",
+        "group": "function_arguments",
+        "initial_prefix": [],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "reference": "stimulus_file_width",
+                "subject": "width"
+              },
+              "name": "explain_parameter_data_matching"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "I'm cross-checking a stimulus-loading bug. Which on-disk stimulus dimension should equal the configured width?",
+        "reference_eligible": false,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-arguments-height-data",
+        "case_id": "targeted-dev-arguments-height-data-case",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-arguments-height-data",
+        "group": "function_arguments",
+        "initial_prefix": [],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "reference": "stimulus_file_height",
+                "subject": "height"
+              },
+              "name": "explain_parameter_data_matching"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "For that kind of stimulus-file cross-check, which dimension is expected to match the XML height field?",
+        "reference_eligible": false,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-arguments-horizontal-zero",
+        "case_id": "targeted-dev-arguments-horizontal-zero-case",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-arguments-horizontal-zero",
+        "group": "function_arguments",
+        "initial_prefix": [],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "property": "zero_inclusion",
+                "subject": "num_horizontal_prfs"
+              },
+              "name": "explain_grid_axis_geometry"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Does adjusting the horizontal candidate count change whether zero eccentricity is represented along that axis?",
+        "reference_eligible": false,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-arguments-date-false-literal",
+        "case_id": "targeted-dev-arguments-date-false-literal-case",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-arguments-date-false-literal",
+        "group": "function_arguments",
+        "initial_prefix": [],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "prepend_date",
+                "value": "False"
+              },
+              "name": "explain_flag_literal_effect"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "My config literally contains False for prepend_date. How does the loader interpret that spelling?",
+        "reference_eligible": false,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-arguments-version-omitted",
+        "case_id": "targeted-dev-arguments-version-omitted-case",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-arguments-version-omitted",
+        "group": "function_arguments",
+        "initial_prefix": [],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "version",
+                "value_state": "omitted"
+              },
+              "name": "explain_unset_value"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "My XML root has no version attribute at all. What happens when GEM-pRF reads it?",
+        "reference_eligible": false,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-arguments-hemi-labels",
+        "case_id": "targeted-dev-arguments-hemi-labels-case",
+        "cohort": "supported",
+        "expected_targets": [],
+        "family_id": "targeted-dev-arguments-hemi-labels",
+        "group": "function_arguments",
+        "initial_prefix": [],
+        "panel": "challenge",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "literals": [
+                  "l",
+                  "r"
+                ],
+                "subject": "hemi"
+              },
+              "name": "explain_label_case_acceptance"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "For the hemisphere filter, I'm typing the l and r labels. Would changing their case select the same hemispheres?",
+        "reference_eligible": false,
+        "split": "dev",
+        "turn_index": 1
+      }
+    ],
+    "closed_loop": [
+      {
+        "bootstrap_family_id": "targeted-dev-episode-notebook-timing",
+        "case_id": "targeted-dev-episode-notebook-timing-t1",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-notebook-timing",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-notebook-timing",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "TR"
+              },
+              "name": "get_units"
+            },
+            {
+              "arguments": {
+                "subject": "slice_time_ref"
+              },
+              "name": "explain_purpose"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "My lab notebook needs two separate entries. What unit goes with TR? What job does slice_time_ref do?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-notebook-timing",
+        "case_id": "targeted-dev-episode-notebook-timing-t2",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-notebook-timing",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-notebook-timing",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "input_file_extension"
+              },
+              "name": "get_allowed_values"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "For the next page, enumerate the supported input_file_extension values.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 2
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-notebook-timing",
+        "case_id": "targeted-dev-episode-notebook-timing-t3",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-notebook-timing",
+        "expected_targets": [
+          "t1.c1"
+        ],
+        "family_id": "targeted-dev-episode-notebook-timing",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "TR"
+              },
+              "name": "get_default_value"
+            }
+          ],
+          "kind": "replace",
+          "part": 1,
+          "target_exchange": 1
+        },
+        "question": "Edit just the TR entry in your first reply to say what GEM-pRF supplies as its default. If that entry was never made, give the default on its own.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 3
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-notebook-timing",
+        "case_id": "targeted-dev-episode-notebook-timing-t4",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-notebook-timing",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-notebook-timing",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "num_frames_downsampled"
+              },
+              "name": "explain_purpose"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "New topic for my notebook. What is num_frames_downsampled used for?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 4
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-notebook-timing",
+        "case_id": "targeted-dev-episode-notebook-timing-t5",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-notebook-timing",
+        "expected_targets": [
+          "t1.c1"
+        ],
+        "family_id": "targeted-dev-episode-notebook-timing",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 1,
+          "target_exchange": 1
+        },
+        "question": "I'm comparing notebook revisions. Read back the unedited TR unit answer from reply one. If you can't identify a scientific answer there, ask which answer I mean.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 5
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-archive-path",
+        "case_id": "targeted-dev-episode-archive-path-t1",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-archive-path",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-archive-path",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "aspect": "intended_contents",
+                "subject": "measured_data_filepath"
+              },
+              "name": "describe_path_target"
+            },
+            {
+              "arguments": {
+                "subject": "concatenate_item"
+              },
+              "name": "explain_purpose"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "In order, tell me what measured_data_filepath is meant to contain and what concatenate_item controls.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-archive-path",
+        "case_id": "targeted-dev-episode-archive-path-t2",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-archive-path",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-archive-path",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "run_type"
+              },
+              "name": "get_allowed_values"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "I also need the list of legal run_type settings for the archive.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 2
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-archive-path",
+        "case_id": "targeted-dev-episode-archive-path-t3",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-archive-path",
+        "expected_targets": [
+          "t1.c1"
+        ],
+        "family_id": "targeted-dev-episode-archive-path",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "measured_data_filepath"
+              },
+              "name": "explain_path_portability"
+            }
+          ],
+          "kind": "replace",
+          "part": 1,
+          "target_exchange": 1
+        },
+        "question": "Change the first subanswer of your opening reply to discuss how portable measured_data_filepath is between computers. If no subanswer exists, answer that portability question on its own.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 3
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-archive-path",
+        "case_id": "targeted-dev-episode-archive-path-t4",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-archive-path",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-archive-path",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "default_hrf.t"
+              },
+              "name": "get_units"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "For a separate table, give the unit convention associated with default_hrf.t.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 4
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-archive-path",
+        "case_id": "targeted-dev-episode-archive-path-t5",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-archive-path",
+        "expected_targets": [
+          "t1.c1"
+        ],
+        "family_id": "targeted-dev-episode-archive-path",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 1,
+          "target_exchange": 1
+        },
+        "question": "For the archive, quote just the answer about intended measured-data contents as it stood when you first sent it. If you cannot locate that answer, ask me to identify it.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 5
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-registration-notes",
+        "case_id": "targeted-dev-episode-registration-notes-t1",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-registration-notes",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-registration-notes",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "hemi"
+              },
+              "name": "get_allowed_values"
+            },
+            {
+              "arguments": {
+                "subject": "analysis"
+              },
+              "name": "explain_purpose"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Make a two-item reference card. List valid hemi values first and explain what the analysis option identifies second.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-registration-notes",
+        "case_id": "targeted-dev-episode-registration-notes-t2",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-registration-notes",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-registration-notes",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "space"
+              },
+              "name": "get_default_value"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "What value can I document as the default, if any, for the space setting?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 2
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-registration-notes",
+        "case_id": "targeted-dev-episode-registration-notes-t3",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-registration-notes",
+        "expected_targets": [
+          "t1.c2"
+        ],
+        "family_id": "targeted-dev-episode-registration-notes",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "analysis"
+              },
+              "name": "explain_code_usage"
+            }
+          ],
+          "kind": "replace",
+          "part": 2,
+          "target_exchange": 1
+        },
+        "question": "In your initial reference card, edit item two to point to the code that uses analysis. If there was no second item, just tell me where the code uses it.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 3
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-registration-notes",
+        "case_id": "targeted-dev-episode-registration-notes-t4",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-registration-notes",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-registration-notes",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "individual.ses"
+              },
+              "name": "explain_purpose"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Write a separate one-line explanation of what individual.ses does.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 4
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-registration-notes",
+        "case_id": "targeted-dev-episode-registration-notes-t5",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-registration-notes",
+        "expected_targets": [
+          "t1.c2"
+        ],
+        "family_id": "targeted-dev-episode-registration-notes",
+        "group": "repeat_original",
+        "panel": "closed_loop",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 2,
+          "target_exchange": 1
+        },
+        "question": "I'm auditing the change to item two. Return its initial explanation of what analysis identifies. If the original subanswer can't be identified, please clarify.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 5
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-grid-entry",
+        "case_id": "targeted-dev-episode-grid-entry-t1",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-grid-entry",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-grid-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "visual_field_radius"
+              },
+              "name": "explain_purpose"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "For an unrelated heading, what is visual_field_radius for?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-grid-entry",
+        "case_id": "targeted-dev-episode-grid-entry-t2",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-grid-entry",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-grid-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "width"
+              },
+              "name": "get_units"
+            },
+            {
+              "arguments": {
+                "property": "spacing",
+                "subject": "num_horizontal_prfs"
+              },
+              "name": "explain_grid_axis_geometry"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "In order, what units are used for width, and how does num_horizontal_prfs affect spacing?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 2
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-grid-entry",
+        "case_id": "targeted-dev-episode-grid-entry-t3",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-grid-entry",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-grid-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "num_horizontal_prfs"
+              },
+              "name": "explain_code_usage"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "I also need the code location that reads num_horizontal_prfs.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 3
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-grid-entry",
+        "case_id": "targeted-dev-episode-grid-entry-t4",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-grid-entry",
+        "expected_targets": [
+          "t2.c2"
+        ],
+        "family_id": "targeted-dev-episode-grid-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "property": "zero_inclusion",
+                "subject": "num_horizontal_prfs"
+              },
+              "name": "explain_grid_axis_geometry"
+            }
+          ],
+          "kind": "replace",
+          "part": 2,
+          "target_exchange": 2
+        },
+        "question": "Edit only your spacing answer in the second reply to address whether zero is included along the same axis. If that subanswer is absent, answer the zero question on its own.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 4
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-grid-entry",
+        "case_id": "targeted-dev-episode-grid-entry-t5",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-grid-entry",
+        "expected_targets": [
+          "t2.c1"
+        ],
+        "family_id": "targeted-dev-episode-grid-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 1,
+          "target_exchange": 2
+        },
+        "question": "Verify my notes by reading back the width-units subanswer from reply two. If it was never recorded, ask which answer I want.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 5
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-results-entry",
+        "case_id": "targeted-dev-episode-results-entry-t1",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-results-entry",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-results-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "results.basepath"
+              },
+              "name": "explain_purpose"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "First document the purpose of the results directory setting results.basepath.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-results-entry",
+        "case_id": "targeted-dev-episode-results-entry-t2",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-results-entry",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-results-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "results_anaylsis_id.overwrite"
+              },
+              "name": "get_default_value"
+            },
+            {
+              "arguments": {
+                "subject": "prepend_date"
+              },
+              "name": "explain_purpose"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Make two entries in this order. What is the default for results_anaylsis_id.overwrite? What does prepend_date do?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 2
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-results-entry",
+        "case_id": "targeted-dev-episode-results-entry-t3",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-results-entry",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-results-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "custom_filename_postfix"
+              },
+              "name": "explain_code_usage"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Separately, what code reads the setting for custom_filename_postfix?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 3
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-results-entry",
+        "case_id": "targeted-dev-episode-results-entry-t4",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-results-entry",
+        "expected_targets": [
+          "t2.c2"
+        ],
+        "family_id": "targeted-dev-episode-results-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "prepend_date",
+                "value": "False"
+              },
+              "name": "explain_flag_literal_effect"
+            }
+          ],
+          "kind": "replace",
+          "part": 2,
+          "target_exchange": 2
+        },
+        "question": "Change the second entry from reply two so it explains what literal False for prepend_date does. If you cannot find that entry, answer just what the literal does.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 4
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-results-entry",
+        "case_id": "targeted-dev-episode-results-entry-t5",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-results-entry",
+        "expected_targets": [
+          "t2.c1"
+        ],
+        "family_id": "targeted-dev-episode-results-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 1,
+          "target_exchange": 2
+        },
+        "question": "Read exactly the overwrite-default part from that two-entry reply. Ask me to locate it if it is missing.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 5
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-condition-entry",
+        "case_id": "targeted-dev-episode-condition-entry-t1",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-condition-entry",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-condition-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "optional_params.filepath"
+              },
+              "name": "explain_purpose"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "What purpose does the optional_params.filepath setting serve?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-condition-entry",
+        "case_id": "targeted-dev-episode-condition-entry-t2",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-condition-entry",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-condition-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "sigmas.key"
+              },
+              "name": "explain_code_usage"
+            },
+            {
+              "arguments": {
+                "subject": "hrf.use_from_file"
+              },
+              "name": "get_default_value"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Please answer in order. Where is sigmas.key used in code? What is the default setting for hrf.use_from_file?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 2
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-condition-entry",
+        "case_id": "targeted-dev-episode-condition-entry-t3",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-condition-entry",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-condition-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "aspect": "filesystem_object_kind",
+                "subject": "stimulus.directory"
+              },
+              "name": "describe_path_target"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "For a separate checklist, what type of filesystem object is stimulus.directory intended to name?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 3
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-condition-entry",
+        "case_id": "targeted-dev-episode-condition-entry-t4",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-condition-entry",
+        "expected_targets": [
+          "t2.c2"
+        ],
+        "family_id": "targeted-dev-episode-condition-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "hrf.use_from_file",
+                "value": true
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "kind": "replace",
+          "part": 2,
+          "target_exchange": 2
+        },
+        "question": "Amend the HRF default entry in your second reply to describe the effect when hrf.use_from_file is true. If that entry is unavailable, give that effect as a separate answer.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 4
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-condition-entry",
+        "case_id": "targeted-dev-episode-condition-entry-t5",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-condition-entry",
+        "expected_targets": [
+          "t2.c1"
+        ],
+        "family_id": "targeted-dev-episode-condition-entry",
+        "group": "replace_answer",
+        "panel": "closed_loop",
+        "policy": {
+          "kind": "repeat_answer",
+          "part": 1,
+          "target_exchange": 2
+        },
+        "question": "Return the sigmas.key code-usage subanswer from your second reply exactly as shown, or clarify if that entry is missing.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 5
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-loading-choices",
+        "case_id": "targeted-dev-episode-loading-choices-t1",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-loading-choices",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-loading-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "_clarify": true,
+                "_missing": [
+                  "value"
+                ],
+                "subject": "hrf.use_from_file"
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Open an item on how my hrf.use_from_file setting behaves. I still need to look up whether it's enabled, so ask me for its value.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-loading-choices",
+        "case_id": "targeted-dev-episode-loading-choices-t2",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-loading-choices",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-loading-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "_clarify": true,
+                "_missing": [
+                  "value"
+                ],
+                "subject": "sigmas.use_from_file"
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Open another item about the effect of my sigmas.use_from_file setting. Its value is missing from my notes too, so ask separately.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 2
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-loading-choices",
+        "case_id": "targeted-dev-episode-loading-choices-t3",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-loading-choices",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-loading-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "default_hrf.t"
+              },
+              "name": "explain_code_usage"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Between those items, tell me where default_hrf.t is read in code.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 3
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-loading-choices",
+        "case_id": "targeted-dev-episode-loading-choices-t4",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-loading-choices",
+        "expected_targets": [
+          "t2.p1"
+        ],
+        "family_id": "targeted-dev-episode-loading-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "sigmas.use_from_file",
+                "value": false
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 2,
+          "values": {
+            "value": false
+          }
+        },
+        "question": "Finish the open sigmas.use_from_file item. It is false. Leave the other item open. If this item never opened, answer its effect alone.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 4
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-loading-choices",
+        "case_id": "targeted-dev-episode-loading-choices-t5",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-loading-choices",
+        "expected_targets": [
+          "t1.p1"
+        ],
+        "family_id": "targeted-dev-episode-loading-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "hrf.use_from_file",
+                "value": true
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 1,
+          "values": {
+            "value": true
+          }
+        },
+        "question": "Now finish the hrf.use_from_file item that I raised before it. It is true. If that item never opened, explain this effect on its own.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 5
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-fitting-choices",
+        "case_id": "targeted-dev-episode-fitting-choices-t1",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-fitting-choices",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-fitting-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "_clarify": true,
+                "_missing": [
+                  "value"
+                ],
+                "subject": "refinefit_on_gpu"
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Open an item on how my refinefit_on_gpu setting behaves. I still need to look up whether it's enabled, so ask me for its value.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-fitting-choices",
+        "case_id": "targeted-dev-episode-fitting-choices-t2",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-fitting-choices",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-fitting-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "_clarify": true,
+                "_missing": [
+                  "value"
+                ],
+                "subject": "normalize"
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Open another item about the effect of my normalize setting. Its value is missing from my notes too, so ask separately.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 2
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-fitting-choices",
+        "case_id": "targeted-dev-episode-fitting-choices-t3",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-fitting-choices",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-fitting-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "max_sigma"
+              },
+              "name": "get_units"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "As a separate item for the fitting sheet, what is max_sigma measured in?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 3
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-fitting-choices",
+        "case_id": "targeted-dev-episode-fitting-choices-t4",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-fitting-choices",
+        "expected_targets": [
+          "t2.p1"
+        ],
+        "family_id": "targeted-dev-episode-fitting-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "normalize",
+                "value": true
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 2,
+          "values": {
+            "value": true
+          }
+        },
+        "question": "Finish the open normalize item. It is true. Leave the other item open. If this item never opened, answer its effect alone.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 4
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-fitting-choices",
+        "case_id": "targeted-dev-episode-fitting-choices-t5",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-fitting-choices",
+        "expected_targets": [
+          "t1.p1"
+        ],
+        "family_id": "targeted-dev-episode-fitting-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "refinefit_on_gpu",
+                "value": false
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 1,
+          "values": {
+            "value": false
+          }
+        },
+        "question": "Now finish the refinefit_on_gpu item that I raised before it. It is false. If that item never opened, explain this effect on its own.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 5
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-runtime-choices",
+        "case_id": "targeted-dev-episode-runtime-choices-t1",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-runtime-choices",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-runtime-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "_clarify": true,
+                "_missing": [
+                  "value"
+                ],
+                "subject": "write_debug_info"
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Open an item on how my write_debug_info setting behaves. I still need to look up whether it's enabled, so ask me for its value.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 1
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-runtime-choices",
+        "case_id": "targeted-dev-episode-runtime-choices-t2",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-runtime-choices",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-runtime-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "_clarify": true,
+                "_missing": [
+                  "value"
+                ],
+                "subject": "optional_params.enable"
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "Open another item about the effect of my optional_params.enable setting. Its value is missing from my notes too, so ask separately.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 2
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-runtime-choices",
+        "case_id": "targeted-dev-episode-runtime-choices-t3",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-runtime-choices",
+        "expected_targets": [],
+        "family_id": "targeted-dev-episode-runtime-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "calls": [
+            {
+              "arguments": {
+                "subject": "version"
+              },
+              "name": "get_default_value"
+            }
+          ],
+          "kind": "fresh"
+        },
+        "question": "One separate detail for this checklist: what XML version is documented by default?",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 3
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-runtime-choices",
+        "case_id": "targeted-dev-episode-runtime-choices-t4",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-runtime-choices",
+        "expected_targets": [
+          "t2.p1"
+        ],
+        "family_id": "targeted-dev-episode-runtime-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "optional_params.enable",
+                "value": false
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 2,
+          "values": {
+            "value": false
+          }
+        },
+        "question": "Finish the open optional_params.enable item. It is false. Leave the other item open. If this item never opened, answer its effect alone.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 4
+      },
+      {
+        "bootstrap_family_id": "targeted-dev-episode-runtime-choices",
+        "case_id": "targeted-dev-episode-runtime-choices-t5",
+        "cohort": "supported",
+        "dialogue_id": "targeted-dev-episode-runtime-choices",
+        "expected_targets": [
+          "t1.p1"
+        ],
+        "family_id": "targeted-dev-episode-runtime-choices",
+        "group": "resolve_pending",
+        "panel": "closed_loop",
+        "policy": {
+          "fallback_calls": [
+            {
+              "arguments": {
+                "subject": "write_debug_info",
+                "value": true
+              },
+              "name": "explain_boolean_effect"
+            }
+          ],
+          "function": "explain_boolean_effect",
+          "kind": "pending_resolve",
+          "target_exchange": 1,
+          "values": {
+            "value": true
+          }
+        },
+        "question": "Now finish the write_debug_info item that I raised before it. It is true. If that item never opened, explain this effect on its own.",
+        "reference_eligible": true,
+        "split": "dev",
+        "turn_index": 5
+      }
+    ]
+  },
+  "registry_sha256": "14f523a431292bcae2a50bbc692974a7d7dfec0251bdb305e0ae8ac17b9046a0",
+  "schema": "gemprf-targeted-dialogues-v1",
+  "split": "dev"
+}

@@ -2,6 +2,7 @@ assets/*.safetensors filter=lfs diff=lfs merge=lfs -text
 assets/train-*.jsonl filter=lfs diff=lfs merge=lfs -text
 assets/*.json text eol=lf
 assets/dev700.jsonl text eol=lf
+assets/targeted-train-v1.jsonl text eol=lf
 *.py text eol=lf
 *.mjs text eol=lf
 assets/diagnostic-train-contexts.jsonl filter=lfs diff=lfs merge=lfs -text
